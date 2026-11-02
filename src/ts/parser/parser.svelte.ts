@@ -20,6 +20,7 @@ import katex from 'katex'
 import { getModelInfo } from '../model/modellist';
 import { registerCBS, type matcherArg, type RegisterCallback } from '../cbs';
 import cssSelectorParser from 'postcss-selector-parser'
+import { cjkSmartQuotes } from './cjkSmartQuotes'
 
 const markdownItOptions = {
     html: true,
@@ -42,6 +43,8 @@ const mdHighlight = markdownit({
 
 md.disable(['code'])
 mdHighlight.disable(['code'])
+md.use(cjkSmartQuotes)
+mdHighlight.use(cjkSmartQuotes)
 
 DOMPurify.addHook("uponSanitizeElement", (node: HTMLElement, data) => {
     if (data.tagName === "iframe") {
