@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 // that are still initialising when the parser is imported directly (circular
 // import). None of it is needed to render plain markdown, so stub it out like
 // the other parser-adjacent tests do.
-vi.mock("../process/modules", () => ({
+vi.mock("../../process/modules", () => ({
     getModules: () => [],
     getModuleAssets: () => [],
     getModuleLorebooks: () => [],
@@ -13,7 +13,7 @@ vi.mock("../process/modules", () => ({
     moduleUpdate: () => {},
 }));
 
-import { ParseMarkdown } from "./parser.svelte";
+import { ParseMarkdown } from "../parser.svelte";
 
 // End-to-end: the rendered chat HTML must wrap paired quotes in
 // <mark risu-mark="quote1"> (single quotes) / <mark risu-mark="quote2"> (double quotes),
@@ -64,6 +64,12 @@ describe("quote highlighting markup (quote1 / quote2)", () => {
         expect(await render("'A'는")).toBe(`${Q1("A")}는`);
         expect(await render('"안녕"이라고 말했다.')).toBe(`${Q2("안녕")}이라고 말했다.`);
         expect(await render("그녀는 \"I don't know\"라고 했다.")).toBe(`그녀는 ${Q2("I don’t know")}라고 했다.`);
+    });
+
+    it("Korean followed by an English possessive keeps its apostrophe and gets no mark", async () => {
+        expect(await render("친구's book")).toBe("친구’s book");
+        // the parser flattens a typed ’ to ' before rendering; it must come back as ’
+        expect(await render("맥도날드’s 햄버거")).toBe("맥도날드’s 햄버거");
     });
 
     it("smart quotes typed directly are normalised and highlighted the same way", async () => {

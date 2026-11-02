@@ -9,9 +9,17 @@
 // never recognised and RisuAI's quote highlighting (quote1/quote2 marks)
 // silently failed for those sentences.
 //
-// This rule is a port of markdown-it 14's smartquotes with one extra decision:
-// a quote that touches a CJK character on either side is never an apostrophe,
-// so it is always allowed to open or close. English contractions are untouched.
+// This rule is a port of markdown-it 14's smartquotes with one extra decision
+// for a quote that sits between two word characters and touches a CJK
+// character on at least one side:
+//
+//   - it may always close an open quote (`'테스트'는`, `'A'는`, `'한국어'English`)
+//   - it may open a quote only when both neighbours are CJK (`테스트'옥좌'에`)
+//   - otherwise it is an apostrophe, as in English (`친구's`, `맥도날드's`)
+//
+// A CJK-opened quote that never finds its closer is turned back into an
+// apostrophe, matching what upstream would have produced. Text without CJK
+// characters behaves exactly as upstream markdown-it.
 
 import type markdownit from 'markdown-it'
 import type StateCore from 'markdown-it/lib/rules_core/state_core.mjs'
@@ -21,40 +29,53 @@ const QUOTE_TEST_RE = /['"]/
 const QUOTE_RE = /['"]/g
 const APOSTROPHE = '’' /* ’ */
 
+const CJK_RE = /[\p{Script=Han}\p{Script=Hangul}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Bopomofo}]/u
+
+export function isCJKChar(code: number) {
+    return CJK_RE.test(String.fromCodePoint(code))
+}
+
 function replaceAt(str: string, index: number, ch: string) {
     return str.slice(0, index) + ch + str.slice(index + 1)
 }
 
-export function isCJKChar(code: number) {
-    return (
-        (code >= 0x1100 && code <= 0x11ff) || // Hangul Jamo
-        (code >= 0x3040 && code <= 0x30ff) || // Hiragana, Katakana
-        (code >= 0x3130 && code <= 0x318f) || // Hangul Compatibility Jamo
-        (code >= 0x31f0 && code <= 0x31ff) || // Katakana Phonetic Extensions
-        (code >= 0x3400 && code <= 0x4dbf) || // CJK Unified Ideographs Extension A
-        (code >= 0x4e00 && code <= 0x9fff) || // CJK Unified Ideographs
-        (code >= 0xa960 && code <= 0xa97f) || // Hangul Jamo Extended-A
-        (code >= 0xac00 && code <= 0xd7ff) || // Hangul Syllables, Hangul Jamo Extended-B
-        (code >= 0xf900 && code <= 0xfaff) || // CJK Compatibility Ideographs
-        (code >= 0xff66 && code <= 0xff9f) || // Halfwidth Katakana
-        (code >= 0x20000 && code <= 0x3134f)  // CJK Unified Ideographs Extension B..G
-    )
+// Code point of the character that ends right before `index`, handling a
+// surrogate pair without allocating a substring.
+function codePointBefore(str: string, index: number) {
+    const code = str.charCodeAt(index - 1)
+    if ((code & 0xfc00) === 0xdc00 && index >= 2 && (str.charCodeAt(index - 2) & 0xfc00) === 0xd800) {
+        return str.codePointAt(index - 2) ?? code
+    }
+    return code
 }
 
-function lastCodePoint(str: string) {
-    if (!str) return 0x20
-    const last = str.charCodeAt(str.length - 1)
-    if (last >= 0xdc00 && last <= 0xdfff && str.length >= 2) {
-        return str.codePointAt(str.length - 2) ?? last
-    }
-    return last
+type StackItem = {
+    token: number
+    pos: number
+    single: boolean
+    level: number
+    // opened only because of the CJK rule; becomes an apostrophe if never closed
+    cjk: boolean
 }
 
 function processInlines(tokens: Token[], state: StateCore) {
     const { isWhiteSpace, isPunctChar, isMdAsciiPunct } = state.md.utils
     let j: number
 
-    const stack: { token: number, pos: number, single: boolean, level: number }[] = []
+    const stack: StackItem[] = []
+
+    // Drop stack entries from `len` on. A single quote that was only allowed to
+    // open because of the CJK rule and never got closed is restored to the
+    // apostrophe upstream would have produced (same length, so no index shifts).
+    const truncateStack = (len: number) => {
+        for (let k = stack.length - 1; k >= len; k--) {
+            const item = stack[k]
+            if (item.cjk && item.single) {
+                tokens[item.token].content = replaceAt(tokens[item.token].content, item.pos, APOSTROPHE)
+            }
+        }
+        stack.length = len
+    }
 
     for (let i = 0; i < tokens.length; i++) {
         const token = tokens[i]
@@ -64,7 +85,7 @@ function processInlines(tokens: Token[], state: StateCore) {
         for (j = stack.length - 1; j >= 0; j--) {
             if (stack[j].level <= thisLevel) { break }
         }
-        stack.length = j + 1
+        truncateStack(j + 1)
 
         if (token.type !== 'text') { continue }
 
@@ -88,13 +109,13 @@ function processInlines(tokens: Token[], state: StateCore) {
             let lastChar = 0x20
 
             if (t.index - 1 >= 0) {
-                lastChar = lastCodePoint(text.slice(0, t.index))
+                lastChar = codePointBefore(text, t.index)
             } else {
                 for (j = i - 1; j >= 0; j--) {
                     if (tokens[j].type === 'softbreak' || tokens[j].type === 'hardbreak') break // lastChar defaults to 0x20
                     if (!tokens[j].content) continue // should skip all tokens except 'text', 'html_inline' or 'code_inline'
 
-                    lastChar = lastCodePoint(tokens[j].content)
+                    lastChar = codePointBefore(tokens[j].content, tokens[j].content.length)
                     break
                 }
             }
@@ -144,16 +165,24 @@ function processInlines(tokens: Token[], state: StateCore) {
                 }
             }
 
+            let cjkOpen = false
+
             if (canOpen && canClose) {
                 // The quote is surrounded by non-space, non-punctuation characters.
                 //
                 // Upstream treats this as "middle of a word" (an apostrophe) unless
                 // a punctuation character is adjacent. CJK scripts attach particles
-                // directly to the closing quote (`'테스트'는`, `"안녕"이라고`) and
-                // never use a mid-word apostrophe, so a quote touching a CJK
-                // character is always a real quote: let the stack decide whether
-                // it opens or closes.
-                if (!(isCJKChar(lastChar) || isCJKChar(nextChar))) {
+                // directly to the closing quote (`'테스트'는`, `"안녕"이라고`), so a
+                // quote touching a CJK character may always close. It may open
+                // only when both neighbours are CJK (`테스트'옥좌'에`); a CJK
+                // character followed by Latin (`친구's`) is still an apostrophe.
+                const lastCJK = isCJKChar(lastChar)
+                const nextCJK = isCJKChar(nextChar)
+                if (lastCJK || nextCJK) {
+                    canClose = true
+                    canOpen = lastCJK && nextCJK
+                    cjkOpen = canOpen
+                } else {
                     canOpen = isLastPunctChar
                     canClose = isNextPunctChar
                 }
@@ -193,10 +222,14 @@ function processInlines(tokens: Token[], state: StateCore) {
                         pos += closeQuote.length - 1
                         if (item.token === i) { pos += openQuote.length - 1 }
 
+                        // unmatched openers nested inside the pair are dropped;
+                        // the matched opener itself (stack[j]) is simply popped
+                        truncateStack(j + 1)
+                        stack.length = j
+
                         text = token.content
                         max = text.length
 
-                        stack.length = j
                         continue OUTER
                     }
                 }
@@ -207,13 +240,16 @@ function processInlines(tokens: Token[], state: StateCore) {
                     token: i,
                     pos: t.index,
                     single: isSingle,
-                    level: thisLevel
+                    level: thisLevel,
+                    cjk: cjkOpen,
                 })
             } else if (canClose && isSingle) {
                 token.content = replaceAt(token.content, t.index, APOSTROPHE)
             }
         }
     }
+
+    truncateStack(0)
 }
 
 function cjkSmartQuotesRule(state: StateCore) {

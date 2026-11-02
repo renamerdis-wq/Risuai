@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import markdownit from "markdown-it";
-import { cjkSmartQuotes } from "./cjkSmartQuotes";
+import { cjkSmartQuotes, isCJKChar } from "../cjkSmartQuotes";
 
 // Same options as parser.svelte.ts: quotes are emitted as private-use
 // placeholders which the parser later turns into <mark risu-mark="..."> tags.
@@ -88,10 +88,24 @@ describe("cjkSmartQuotes: mixed-language sentences", () => {
         ["'日本語'です", "‹日本語›です"],
         ["「テスト」'テスト'と言った", "「テスト」‹テスト›と言った"],
         ["'中文'的", "‹中文›的"],
+        ["'ㄅㄆㄇ'ㄈ", "‹ㄅㄆㄇ›ㄈ"],
     ];
 
     it.each(cases)("%s", (input, expected) => {
         expect(render(withPlugin, input)).toBe(expected);
+    });
+
+    it("CJK followed by an English possessive/contraction stays an apostrophe", () => {
+        const cases: [string, string][] = [
+            ["친구's book", "친구’s book"],
+            ["맥도날드's 햄버거", "맥도날드’s 햄버거"],
+            ["맥도날드’s 햄버거", "맥도날드’s 햄버거"],
+            ["테스트 A'는", "테스트 A’는"],
+        ];
+        for (const [input, expected] of cases) {
+            expect(render(withPlugin, input)).toBe(expected);
+            expect(render(upstream, input)).toBe(expected);
+        }
     });
 
     it("keeps working across inline markup boundaries", () => {
@@ -102,5 +116,51 @@ describe("cjkSmartQuotes: mixed-language sentences", () => {
     it("leaves unmatched quotes alone", () => {
         expect(render(withPlugin, "'90년대")).toBe("'90년대");
         expect(render(withPlugin, "테스트'")).toBe("테스트’");
+    });
+
+    it("a CJK-opened quote that never closes falls back to an apostrophe, like upstream", () => {
+        expect(render(withPlugin, "테스트'안녕")).toBe("테스트’안녕");
+        expect(render(upstream, "테스트'안녕")).toBe("테스트’안녕");
+        // a CJK-opened single quote nested inside a double-quote pair is dropped
+        // (and restored to an apostrophe) when the outer pair closes
+        expect(render(withPlugin, "\"그는 내'꺼 야\"")).toBe("«그는 내’꺼 야»");
+    });
+
+    it("handles astral code points next to a quote", () => {
+        expect(render(withPlugin, "'𠀋'는")).toBe("‹𠀋›는"); // U+2000B, CJK Ext B
+        expect(render(withPlugin, "'테스트'😀")).toBe("‹테스트›😀");
+        expect(render(withPlugin, "😀'테스트'는")).toBe("😀‹테스트›는");
+    });
+});
+
+describe("cjkSmartQuotes: known limitation (documented, not fixed)", () => {
+    // Any stack-based matcher pairs a closing candidate with the nearest open
+    // quote. A stray opening quote earlier in the paragraph (e.g. the rare
+    // `'90년대` abbreviation style) is therefore closed by the first CJK-flanked
+    // quote that follows it, highlighting text that was not meant as a quote.
+    // Upstream produced no pair at all for these inputs. We accept this
+    // trade-off; the tests pin the behaviour so a change is noticed.
+    it("a stray opener gets paired with the first CJK-flanked quote after it", () => {
+        expect(render(withPlugin, "'90년대 그는'안녕'이라고")).toBe("‹90년대 그는›안녕’이라고");
+        expect(render(upstream, "'90년대 그는'안녕'이라고")).toBe("'90년대 그는’안녕’이라고");
+    });
+
+    it("an ambiguous quote inside a quotation closes it early", () => {
+        expect(render(withPlugin, "'그는 내꺼'야 라고 했다'는")).toBe("‹그는 내꺼›야 라고 했다’는");
+        expect(render(upstream, "'그는 내꺼'야 라고 했다'는")).toBe("'그는 내꺼’야 라고 했다’는");
+    });
+});
+
+describe("isCJKChar", () => {
+    it("covers the CJK scripts", () => {
+        for (const ch of ["가", "ㄱ", "ᄀ", "漢", "㐀", "𠀋", "あ", "ア", "ｱ", "ㄅ"]) {
+            expect(isCJKChar(ch.codePointAt(0)!), ch).toBe(true);
+        }
+    });
+
+    it("rejects non-CJK characters", () => {
+        for (const ch of ["a", "Z", "1", " ", "'", ".", "é", "я", "😀", "「"]) {
+            expect(isCJKChar(ch.codePointAt(0)!), ch).toBe(false);
+        }
     });
 });
