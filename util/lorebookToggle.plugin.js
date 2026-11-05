@@ -1,7 +1,8 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 1.1.0
+//@version 1.2.0
+//@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
 /*
@@ -330,7 +331,7 @@
 
     let offMode = 'hold'; // 'hold' | 'once' | 'sub'  (끄기 버튼이 적용할 상태)
     let filterText = '';
-    let collapsed = new Set();
+    let expanded = new Set(); // 기본은 모두 접힘. 펼친 그룹만 기록
 
     const STYLE = `
         * { box-sizing: border-box; }
@@ -374,6 +375,10 @@
         .seg { display: inline-flex; border: 1px solid #33333f; border-radius: 8px; overflow: hidden; }
         .seg button { border: 0; border-radius: 0; }
         .seg button.active { background: #4b4bd8; color: #fff; }
+        .quickbar { padding-top: 8px; padding-bottom: 8px; gap: 12px; }
+        .quick { display: inline-flex; align-items: center; gap: 6px; }
+        .quick-label { font-size: 12.5px; color: #b0b0bd; }
+        .quick button { padding: 4px 9px; font-size: 12.5px; }
         .list { overflow: auto; flex: 1; }
         .group { border-bottom: 1px solid #22222a; }
         .group-head {
@@ -464,6 +469,12 @@
         );
     }
 
+    const CATEGORIES = [
+        { id: 'char', label: '캐릭터', test: (sid) => sid === 'char' },
+        { id: 'chat', label: '채팅', test: (sid) => sid === 'chat' },
+        { id: 'module', label: '모듈 전체', test: (sid) => sid.startsWith('module:') },
+    ];
+
     async function render() {
         let sources;
         try {
@@ -493,7 +504,7 @@
                 const offCount = items.filter(({ entry }) => getEntryState(entry) !== 'on').length;
                 total.all += items.length;
                 total.off += offCount;
-                const isCollapsed = collapsed.has(source.id);
+                const isCollapsed = !expanded.has(source.id);
 
                 const rows = isCollapsed
                     ? ''
@@ -527,6 +538,20 @@
             })
             .join('');
 
+        const presentCategories = CATEGORIES.filter((cat) =>
+            sources.some((src) => cat.test(src.id) && src.entries.some(isToggleable))
+        );
+        const quickHtml = presentCategories
+            .map(
+                (cat) => `
+                <span class="quick">
+                    <span class="quick-label">${esc(cat.label)}</span>
+                    <button class="danger" data-cat-off="${cat.id}">끄기</button>
+                    <button class="good" data-cat-on="${cat.id}">켜기</button>
+                </span>`
+            )
+            .join('');
+
         document.body.innerHTML = `<style>${STYLE}</style>
         <div class="panel">
             <header>
@@ -543,6 +568,7 @@
                 <button class="danger" data-act="all-off">모두 끄기</button>
                 <button class="good" data-act="all-on">모두 켜기</button>
             </div>
+            ${quickHtml ? `<div class="toolbar quickbar">${quickHtml}</div>` : ''}
             <div class="list">
                 ${groupsHtml || '<div class="empty">표시할 로어북 항목이 없어요.</div>'}
             </div>
@@ -592,11 +618,26 @@
                 applyStates((entry) => (matchesFilter(entry) && getEntryState(entry) !== 'on' ? 'on' : undefined))
             );
 
+        presentCategories.forEach((cat) => {
+            document.querySelector(`[data-cat-off="${cat.id}"]`).onclick = () =>
+                act(`${cat.label} 끄기`, () =>
+                    applyStates((entry, sid) =>
+                        cat.test(sid) && matchesFilter(entry) && getEntryState(entry) === 'on' ? offMode : undefined
+                    )
+                );
+            document.querySelector(`[data-cat-on="${cat.id}"]`).onclick = () =>
+                act(`${cat.label} 켜기`, () =>
+                    applyStates((entry, sid) =>
+                        cat.test(sid) && matchesFilter(entry) && getEntryState(entry) !== 'on' ? 'on' : undefined
+                    )
+                );
+        });
+
         document.querySelectorAll('.group').forEach((groupEl) => {
             const sourceId = groupEl.getAttribute('data-source');
             groupEl.querySelector('[data-act="collapse"]').onclick = () => {
-                if (collapsed.has(sourceId)) collapsed.delete(sourceId);
-                else collapsed.add(sourceId);
+                if (expanded.has(sourceId)) expanded.delete(sourceId);
+                else expanded.add(sourceId);
                 render();
             };
             groupEl.querySelector('[data-act="group-off"]').onclick = () =>
@@ -635,7 +676,7 @@
     const button = await Risuai.registerButton(
         {
             name: '로어북 토글',
-            icon: '📕',
+            icon: '<span data-lbtoggle-btn="1">📕</span>',
             iconType: 'html',
             location: 'action',
             id: BUTTON_ID,
@@ -643,7 +684,53 @@
         open
     );
 
+    // ---------------------------------------------------------------
+    // 진입 버튼 스타일: 리수 기본 파란색(bg-blue-500) → 반투명 회색
+    // 메인 화면 접근 권한이 필요해서 시작 1.5초 뒤 한 번 묻고, 채팅 화면이 다시 그려질 때마다 재적용
+    // ---------------------------------------------------------------
+    const ENTRY_BTN_STYLE =
+        'background:rgba(127,127,127,.16);color:var(--risu-theme-textcolor,#d1d5db);' +
+        'border:1px solid rgba(127,127,127,.38);box-shadow:none;' +
+        'backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);opacity:.8';
+    let rootDoc = null;
+    let styleTimer = null;
+
+    async function styleEntryButton() {
+        if (!rootDoc) return;
+        try {
+            const all = await Risuai.unwarpSafeArray(
+                await rootDoc.querySelectorAll('div.fixed.top-4.right-4 > button')
+            );
+            for (const el of all) {
+                const html = String(await el.getInnerHTML());
+                if (!html.includes('data-lbtoggle-btn')) continue;
+                if ((await el.getAttribute('x-lbtoggle-styled')) === '1') continue;
+                for (const c of ['bg-blue-500', 'hover:bg-blue-600', 'text-white', 'shadow-lg']) {
+                    await el.removeClass(c);
+                }
+                await el.setStyleAttribute(ENTRY_BTN_STYLE);
+                await el.setAttribute('x-lbtoggle-styled', '1');
+            }
+        } catch (e) {
+            /* 화면이 바뀌는 중이면 조용히 다음 틱에 재시도 */
+        }
+    }
+
+    (async () => {
+        try {
+            if (await Risuai.getArgument('keep_blue')) return;
+            await new Promise((r) => setTimeout(r, 1500));
+            rootDoc = await Risuai.getRootDocument();
+            if (!rootDoc) return;
+            await styleEntryButton();
+            styleTimer = setInterval(styleEntryButton, 2500);
+        } catch (e) {
+            console.log(`진입 버튼 스타일 적용 실패: ${e?.message ?? e}`);
+        }
+    })();
+
     await Risuai.onUnload(async () => {
+        if (styleTimer) clearInterval(styleTimer);
         try {
             await Risuai.removeRisuScriptHandler('process', processHandler);
             await Risuai.removeRisuScriptHandler('output', outputHandler);
