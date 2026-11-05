@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 1.2.0
+//@version 1.3.0
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -103,6 +103,7 @@
 
         sources.push({
             id: 'char',
+            enabled: true,
             label: `캐릭터 로어북 · ${char?.name ?? ''}`,
             entries: Array.isArray(char?.globalLore) ? char.globalLore : [],
             write: async (entries) => {
@@ -115,6 +116,7 @@
         if (chat) {
             sources.push({
                 id: 'chat',
+                enabled: true,
                 label: `채팅 로어북 · ${chat.name ?? '현재 채팅'}`,
                 entries: Array.isArray(chat.localLore) ? chat.localLore : [],
                 write: async (entries) => {
@@ -135,6 +137,7 @@
                 const enabled = enabledIds.has(mod.id);
                 sources.push({
                     id: 'module:' + mod.id,
+                    enabled,
                     label: `모듈 · ${mod.name}${enabled ? '' : ' (비활성 모듈)'}`,
                     entries: mod.lorebook,
                     write: async (entries) => {
@@ -332,6 +335,36 @@
     let offMode = 'hold'; // 'hold' | 'once' | 'sub'  (끄기 버튼이 적용할 상태)
     let filterText = '';
     let expanded = new Set(); // 기본은 모두 접힘. 펼친 그룹만 기록
+    let hideDisabledModules = true; // 비활성 모듈 안 보기 (기본 켬)
+    const PREF_KEY = 'lbtoggle_prefs';
+
+    async function loadPrefs() {
+        try {
+            const raw = await Risuai.pluginStorage.getItem(PREF_KEY);
+            const prefs = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            if (prefs && typeof prefs.hideDisabledModules === 'boolean') {
+                hideDisabledModules = prefs.hideDisabledModules;
+            }
+            if (prefs && (prefs.offMode === 'hold' || prefs.offMode === 'once' || prefs.offMode === 'sub')) {
+                offMode = prefs.offMode;
+            }
+        } catch (e) {
+            /* 기본값 사용 */
+        }
+    }
+
+    async function savePrefs() {
+        try {
+            await Risuai.pluginStorage.setItem(PREF_KEY, JSON.stringify({ hideDisabledModules, offMode }));
+        } catch (e) {
+            /* 저장 실패는 무시 */
+        }
+    }
+
+    /** 화면에 보일 소스인지 (비활성 모듈 숨김 옵션 반영) */
+    function isVisibleSource(source) {
+        return !(hideDisabledModules && source.enabled === false);
+    }
 
     const STYLE = `
         * { box-sizing: border-box; }
@@ -376,6 +409,8 @@
         .seg button { border: 0; border-radius: 0; }
         .seg button.active { background: #4b4bd8; color: #fff; }
         .quickbar { padding-top: 8px; padding-bottom: 8px; gap: 12px; }
+        .opt { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; color: #b0b0bd; cursor: pointer; user-select: none; margin-left: auto; }
+        .opt input { accent-color: #4b4bd8; }
         .quick { display: inline-flex; align-items: center; gap: 6px; }
         .quick-label { font-size: 12.5px; color: #b0b0bd; }
         .quick button { padding: 4px 9px; font-size: 12.5px; }
@@ -476,6 +511,8 @@
     ];
 
     async function render() {
+        const prevList = document.querySelector('.list');
+        const prevScroll = prevList ? prevList.scrollTop : 0;
         let sources;
         try {
             sources = await loadSources();
@@ -488,6 +525,10 @@
             document.getElementById('lbt-close').onclick = () => Risuai.hideContainer();
             return;
         }
+
+        const hiddenCount = sources.filter((src) => !isVisibleSource(src)).length;
+        sources = sources.filter(isVisibleSource);
+        const visibleSourceIds = new Set(sources.map((src) => src.id));
 
         const total = { all: 0, off: 0 };
         const groupsHtml = sources
@@ -550,7 +591,11 @@
                     <button class="good" data-cat-on="${cat.id}">켜기</button>
                 </span>`
             )
-            .join('');
+            .join('') +
+            `<label class="opt" title="꺼져 있는 모듈의 로어북은 어차피 프롬프트에 안 들어가요">
+                <input type="checkbox" id="lbt-hide-disabled" ${hideDisabledModules ? 'checked' : ''}>
+                비활성 모듈 안 보기${hiddenCount > 0 && hideDisabledModules ? ` (${hiddenCount}개 숨김)` : ''}
+            </label>`;
 
         document.body.innerHTML = `<style>${STYLE}</style>
         <div class="panel">
@@ -568,7 +613,7 @@
                 <button class="danger" data-act="all-off">모두 끄기</button>
                 <button class="good" data-act="all-on">모두 켜기</button>
             </div>
-            ${quickHtml ? `<div class="toolbar quickbar">${quickHtml}</div>` : ''}
+            <div class="toolbar quickbar">${quickHtml}</div>
             <div class="list">
                 ${groupsHtml || '<div class="empty">표시할 로어북 항목이 없어요.</div>'}
             </div>
@@ -586,12 +631,25 @@
 
         document.getElementById('lbt-close').onclick = () => Risuai.hideContainer();
 
+        const listEl = document.querySelector('.list');
+        if (listEl) listEl.scrollTop = prevScroll;
+
         document.querySelectorAll('[data-mode]').forEach((btn) => {
             btn.onclick = () => {
                 offMode = btn.getAttribute('data-mode');
+                savePrefs();
                 render();
             };
         });
+
+        const hideEl = document.getElementById('lbt-hide-disabled');
+        if (hideEl) {
+            hideEl.onchange = () => {
+                hideDisabledModules = hideEl.checked;
+                savePrefs();
+                render();
+            };
+        }
 
         const filterEl = document.getElementById('lbt-filter');
         let filterTimer = null;
@@ -609,26 +667,35 @@
             }, 150);
         };
 
+        const visible = (sid) => visibleSourceIds.has(sid);
         document.querySelector('[data-act="all-off"]').onclick = () =>
             act('모두 끄기', () =>
-                applyStates((entry) => (matchesFilter(entry) && getEntryState(entry) === 'on' ? offMode : undefined))
+                applyStates((entry, sid) =>
+                    visible(sid) && matchesFilter(entry) && getEntryState(entry) === 'on' ? offMode : undefined
+                )
             );
         document.querySelector('[data-act="all-on"]').onclick = () =>
             act('모두 켜기', () =>
-                applyStates((entry) => (matchesFilter(entry) && getEntryState(entry) !== 'on' ? 'on' : undefined))
+                applyStates((entry, sid) =>
+                    visible(sid) && matchesFilter(entry) && getEntryState(entry) !== 'on' ? 'on' : undefined
+                )
             );
 
         presentCategories.forEach((cat) => {
             document.querySelector(`[data-cat-off="${cat.id}"]`).onclick = () =>
                 act(`${cat.label} 끄기`, () =>
                     applyStates((entry, sid) =>
-                        cat.test(sid) && matchesFilter(entry) && getEntryState(entry) === 'on' ? offMode : undefined
+                        visible(sid) && cat.test(sid) && matchesFilter(entry) && getEntryState(entry) === 'on'
+                            ? offMode
+                            : undefined
                     )
                 );
             document.querySelector(`[data-cat-on="${cat.id}"]`).onclick = () =>
                 act(`${cat.label} 켜기`, () =>
                     applyStates((entry, sid) =>
-                        cat.test(sid) && matchesFilter(entry) && getEntryState(entry) !== 'on' ? 'on' : undefined
+                        visible(sid) && cat.test(sid) && matchesFilter(entry) && getEntryState(entry) !== 'on'
+                            ? 'on'
+                            : undefined
                     )
                 );
         });
@@ -741,6 +808,7 @@
         }
     });
 
+    await loadPrefs();
     await scanFlags();
     console.log('Lorebook Toggle 로드 완료');
 })();
