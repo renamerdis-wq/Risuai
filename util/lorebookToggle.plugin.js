@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 1.3.0
+//@version 1.4.0
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -210,35 +210,92 @@
         return new RegExp(parts.join('[\\s\\S]{0,400}?'), 'g');
     }
 
-    /** 보조모델 요청 메시지 배열에서 sub 항목들을 걷어낸다 */
+    function normalizeLine(line) {
+        return line.replace(/\s+/g, ' ').trim();
+    }
+
+    /** CBS가 없는 리터럴 줄들 (줄 단위 보조 매칭용) */
+    function literalLines(body) {
+        return body
+            .split('\n')
+            .map(normalizeLine)
+            .filter((l) => l.length >= 10 && !l.includes('{{'));
+    }
+
+    /**
+     * 보조모델 요청 메시지 배열에서 sub 항목들을 걷어낸다.
+     * 1차: 항목 전체를 정규식으로 찾아 통째로 제거 (full)
+     * 2차: 1차가 실패한 항목은 CBS 없는 줄들을 줄 단위로 제거 (partial) — {{#if}} 분기처럼
+     *      치환 결과를 예측할 수 없는 항목도 최소한 리터럴 부분은 빠지게 한다.
+     * 반환: { messages, removed, results: [{ entry, result: 'full'|'partial'|'none' }] }
+     */
     function stripSubEntries(messages, entries) {
-        const matchers = entries.map((e) => bodyMatcher(entryBody(e))).filter(Boolean);
-        if (matchers.length === 0) return { messages, removed: 0 };
+        const plans = entries.map((entry) => {
+            const body = entryBody(entry);
+            return { entry, re: bodyMatcher(body), lines: literalLines(body), result: 'none' };
+        });
         let removed = 0;
-        const out = [];
-        for (const msg of messages) {
-            if (typeof msg?.content !== 'string' || msg.content.length === 0) {
-                out.push(msg);
-                continue;
-            }
-            let content = msg.content;
-            for (const re of matchers) {
-                re.lastIndex = 0;
-                const next = content.replace(re, () => {
-                    removed++;
+        let out = messages.map((m) => m);
+
+        // 1차: 정규식 통째 제거
+        for (const plan of plans) {
+            if (!plan.re) continue;
+            out = out.map((msg) => {
+                if (typeof msg?.content !== 'string' || msg.content.length === 0) return msg;
+                plan.re.lastIndex = 0;
+                let hit = false;
+                const content = msg.content.replace(plan.re, () => {
+                    hit = true;
                     return '';
                 });
-                content = next;
-            }
-            if (content === msg.content) {
-                out.push(msg);
-            } else if (content.trim().length === 0 && !msg.multimodals) {
-                // 항목만 담고 있던 메시지는 통째로 제거
-            } else {
-                out.push({ ...msg, content: content.replace(/\n{3,}/g, '\n\n').trim() });
-            }
+                if (!hit) return msg;
+                plan.result = 'full';
+                removed++;
+                return { ...msg, content };
+            });
         }
-        return { messages: out, removed };
+
+        // 2차: 줄 단위 제거 (태그로 감싸져 같은 줄에 붙어 있어도 잡히도록 부분 문자열로 지운다)
+        for (const plan of plans) {
+            if (plan.result === 'full' || plan.lines.length === 0) continue;
+            const lineRes = plan.lines.map(
+                (l) => new RegExp(escapeRegex(l).replace(/ /g, '\\s+'), 'g')
+            );
+            out = out.map((msg) => {
+                if (typeof msg?.content !== 'string' || msg.content.length === 0) return msg;
+                let hits = 0;
+                let content = msg.content;
+                for (const re of lineRes) {
+                    re.lastIndex = 0;
+                    content = content.replace(re, () => {
+                        hits++;
+                        return '';
+                    });
+                }
+                if (hits === 0) return msg;
+                plan.result = 'partial';
+                removed++;
+                return { ...msg, content };
+            });
+        }
+
+        // 비워진 메시지는 통째로 제거, 빈 줄 정리
+        out = out.filter((msg) => {
+            if (typeof msg?.content !== 'string') return true;
+            const original = messages.find((m) => m === msg);
+            if (original) return true; // 손대지 않은 메시지
+            return msg.content.trim().length > 0 || !!msg.multimodals;
+        }).map((msg) => {
+            const original = messages.find((m) => m === msg);
+            if (original || typeof msg?.content !== 'string') return msg;
+            return { ...msg, content: msg.content.replace(/\n{3,}/g, '\n\n').trim() };
+        });
+
+        return {
+            messages: out,
+            removed,
+            results: plans.map((p) => ({ entry: p.entry, result: p.result })),
+        };
     }
 
     // ---------------------------------------------------------------
@@ -286,25 +343,55 @@
         return restoring;
     }
 
+    // 메인 채팅 파이프라인 안인지 표시. 'process' 훅은 메인 전송 직전에만 울리고(첫 메시지에도),
+    // 'output' 훅은 응답을 받은 뒤 울린다. 그 사이의 type==='model' 요청만 진짜 메인 채팅이고,
+    // 그 밖의 'model' 요청은 루아 LLM() 같은 스크립트 호출이므로 보조로 취급한다.
+    // 실패/중단으로 'output'이 안 울리면 15분 뒤 자동 해제 (해제 쪽이 "걷어내지 않음"이라 안전).
+    let mainChatArmed = false;
+    let mainChatArmedAt = 0;
+    const MAIN_ARM_TTL = 15 * 60 * 1000;
+
     const processHandler = async (content) => {
+        mainChatArmed = true;
+        mainChatArmedAt = Date.now();
         await restoreOnce();
         return content;
     };
     const outputHandler = async (content) => {
+        mainChatArmed = false;
         await restoreOnce();
         return content;
     };
+
+    // 최근 요청 기록 (패널에서 확인용)
+    const requestLog = [];
+    const REQUEST_LOG_MAX = 20;
+    function pushLog(item) {
+        requestLog.unshift(item);
+        if (requestLog.length > REQUEST_LOG_MAX) requestLog.length = REQUEST_LOG_MAX;
+    }
 
     // 요청 종류: 'model'(메인 채팅) | 'submodel' | 'otherAx'(루아 axLLM 등) | 'memory' | 'emotion' | 'translate'
     // - once 복구: 채팅 전송이 아닌 보조모델 단독 호출(삽화 모듈 등)에서도 로어북이 이미 계산된 뒤라 여기서 풀어준다.
     //   'translate'는 입력 번역처럼 전송 전에 올 수 있어 제외.
     // - sub 제외: 메인 채팅 요청이 아니면 sub 항목을 메시지에서 걷어낸다.
     const beforeRequestHandler = async (messages, type) => {
+        const log = {
+            time: Date.now(),
+            type,
+            isMain: false,
+            msgCount: Array.isArray(messages) ? messages.length : 0,
+            removed: 0,
+            results: [],
+            error: null,
+        };
         try {
             if (type !== 'translate') {
                 await restoreOnce();
             }
-            if (type !== 'model' && hasSub && Array.isArray(messages)) {
+            const armed = mainChatArmed && Date.now() - mainChatArmedAt < MAIN_ARM_TTL;
+            log.isMain = type === 'model' && armed;
+            if (!log.isMain && hasSub && Array.isArray(messages)) {
                 const sources = await loadSources();
                 const subEntries = [];
                 for (const s of sources) {
@@ -313,14 +400,19 @@
                     }
                 }
                 const result = stripSubEntries(messages, subEntries);
+                log.removed = result.removed;
+                log.results = result.results.map((r) => ({ name: entryTitle(r.entry), result: r.result }));
                 if (result.removed > 0) {
                     console.log(`보조모델 요청(${type})에서 로어북 ${result.removed}개 제거`);
                 }
+                pushLog(log);
                 return result.messages;
             }
         } catch (e) {
-            console.log(`beforeRequest 처리 실패: ${e?.message ?? e}`);
+            log.error = String(e?.message ?? e);
+            console.log(`beforeRequest 처리 실패: ${log.error}`);
         }
+        pushLog(log);
         return messages;
     };
 
@@ -336,6 +428,7 @@
     let filterText = '';
     let expanded = new Set(); // 기본은 모두 접힘. 펼친 그룹만 기록
     let hideDisabledModules = true; // 비활성 모듈 안 보기 (기본 켬)
+    let logOpen = false;
     const PREF_KEY = 'lbtoggle_prefs';
 
     async function loadPrefs() {
@@ -442,6 +535,21 @@
         .row.sub .title { color: #c9d6e6; text-decoration: none; }
         .row .toggle { min-width: 64px; }
         .empty { padding: 32px 16px; text-align: center; color: #8a8a99; font-size: 13px; }
+        .log { border-top: 1px solid #2c2c36; background: #131318; max-height: 38%; display: flex; flex-direction: column; }
+        .log-head { display: flex; align-items: center; gap: 8px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; user-select: none; }
+        .log-head .hint { font-weight: 400; color: #8a8a99; font-size: 12px; flex: 1; }
+        .log-body { overflow: auto; padding: 0 16px 10px; font-size: 12px; }
+        .log-item { padding: 6px 0; border-top: 1px solid #1f1f27; color: #c8c8d2; }
+        .log-item .l1 { display: flex; gap: 8px; flex-wrap: wrap; }
+        .log-item .tag { padding: 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+        .tag.main { background: #1f4d33; color: #8fe2b0; }
+        .tag.aux { background: #1f2f4d; color: #8ec0f0; }
+        .tag.skip { background: #2a2a33; color: #9a9aa8; }
+        .log-item .l2 { color: #8a8a99; margin-top: 2px; }
+        .log-item .ok { color: #8fe2b0; }
+        .log-item .part { color: #f0c98e; }
+        .log-item .miss { color: #f08ea3; }
+        .log-empty { color: #8a8a99; padding: 6px 0 2px; line-height: 1.5; }
         footer {
             padding: 10px 16px; border-top: 1px solid #2c2c36; font-size: 12px; color: #8a8a99;
             display: flex; gap: 8px; align-items: center;
@@ -469,6 +577,52 @@
         else if (entry.key) parts.push('키: ' + entry.key);
         if (entry.selective && entry.secondkey) parts.push('보조: ' + entry.secondkey);
         return parts.join(' · ');
+    }
+
+    function typeLabel(item) {
+        const names = {
+            model: '메인 모델',
+            submodel: '보조 모델',
+            otherAx: '보조 (루아 axLLM 등)',
+            memory: '메모리 요약',
+            emotion: '감정',
+            translate: '번역',
+        };
+        return names[item.type] ?? item.type;
+    }
+
+    function renderLog() {
+        if (requestLog.length === 0) {
+            return `<div class="log-empty">아직 요청이 지나가지 않았어요.<br>
+                채팅을 보냈거나 삽화를 뽑았는데도 계속 비어 있으면, 플러그인 시작 때 뜨는
+                <b>요청 수정(replacer) 권한</b>을 거부한 상태일 수 있어요. 리수를 새로고침한 뒤 허용해주세요.</div>`;
+        }
+        return requestLog
+            .map((item) => {
+                const t = new Date(item.time);
+                const hh = String(t.getHours()).padStart(2, '0');
+                const mm = String(t.getMinutes()).padStart(2, '0');
+                const ss = String(t.getSeconds()).padStart(2, '0');
+                const tag = item.isMain
+                    ? '<span class="tag main">메인 채팅 · 손대지 않음</span>'
+                    : item.results.length === 0
+                      ? '<span class="tag skip">보조 · 걷어낼 항목 없음</span>'
+                      : '<span class="tag aux">보조 · 제외 적용</span>';
+                const detail = item.results
+                    .map((r) => {
+                        const cls = r.result === 'full' ? 'ok' : r.result === 'partial' ? 'part' : 'miss';
+                        const mark = r.result === 'full' ? '✓' : r.result === 'partial' ? '△' : '✕';
+                        return `<span class="${cls}">${mark} ${esc(r.name)}</span>`;
+                    })
+                    .join(' · ');
+                return `<div class="log-item">
+                    <div class="l1"><span>${hh}:${mm}:${ss}</span><span>${esc(typeLabel(item))}</span>${tag}<span>메시지 ${item.msgCount}개</span>${
+                        item.removed > 0 ? `<span>제거 ${item.removed}</span>` : ''
+                    }${item.error ? `<span class="miss">오류: ${esc(item.error)}</span>` : ''}</div>
+                    ${detail ? `<div class="l2">${detail}</div>` : ''}
+                </div>`;
+            })
+            .join('');
     }
 
     function badgeLabel(state) {
@@ -617,6 +771,16 @@
             <div class="list">
                 ${groupsHtml || '<div class="empty">표시할 로어북 항목이 없어요.</div>'}
             </div>
+            <div class="log">
+                <div class="log-head" id="lbt-log-toggle">${logOpen ? '▾' : '▸'} 최근 요청 기록
+                    <span class="hint">${
+                        requestLog.length === 0
+                            ? '아직 기록 없음'
+                            : `${requestLog.length}건 · 마지막: ${typeLabel(requestLog[0])}${requestLog[0].removed > 0 ? ` · 제거 ${requestLog[0].removed}` : ''}`
+                    }</span>
+                </div>
+                ${logOpen ? `<div class="log-body">${renderLog()}</div>` : ''}
+            </div>
             <footer>
                 <span class="status" id="lbt-status">${esc(statusText)}</span>
                 <span>${
@@ -641,6 +805,14 @@
                 render();
             };
         });
+
+        const logToggle = document.getElementById('lbt-log-toggle');
+        if (logToggle) {
+            logToggle.onclick = () => {
+                logOpen = !logOpen;
+                render();
+            };
+        }
 
         const hideEl = document.getElementById('lbt-hide-disabled');
         if (hideEl) {
