@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 1.0.0
+//@version 1.1.0
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
 /*
@@ -14,7 +14,8 @@
  *   키 매칭/상시활성 여부와 상관없이 그 항목을 비활성 처리한다.
  *   이 플러그인은 항목 내용의 데코레이터 블록 끝에
  *     `@@dont_activate lbtoggle`        (고정: 다시 켤 때까지 꺼짐)
- *     `@@dont_activate lbtoggle once`   (이번 턴만: 다음 전송 때 자동 복구)
+ *     `@@dont_activate lbtoggle once`   (이번 턴만: 다음 메인/보조모델 요청 뒤 자동 복구)
+ *     `@@lbtoggle sub_off`              (보조모델만: 메인 채팅엔 포함, 보조모델 요청에서만 제거)
  *   한 줄을 끼워넣거나 빼는 것만으로 토글한다.
  *   키, 보조키, 삽입 순서, 상시활성, 폴더 등 원래 설정은 전혀 건드리지 않는다.
  *   상태가 항목 내용 자체에 들어있으므로 별도 저장소 없이 세이브 파일과 함께 동기화된다.
@@ -29,6 +30,9 @@
     const MARK_BASE = '@@dont_activate lbtoggle';
     const MARK_HOLD = MARK_BASE;
     const MARK_ONCE = MARK_BASE + ' once';
+    // 메인 채팅엔 그대로 들어가고, 보조모델 요청에서만 걷어내는 항목 표시.
+    // 엔진이 모르는 데코레이터라 프롬프트에서는 그냥 제거된다.
+    const MARK_SUB = '@@lbtoggle sub_off';
     const BUTTON_ID = 'lbtoggle-open';
 
     // ---------------------------------------------------------------
@@ -46,10 +50,10 @@
 
     function isMarkLine(line) {
         const t = line.trim();
-        return t === MARK_HOLD || t === MARK_ONCE;
+        return t === MARK_HOLD || t === MARK_ONCE || t === MARK_SUB;
     }
 
-    /** 'on' | 'hold' | 'once' */
+    /** 'on' | 'hold' | 'once' | 'sub' */
     function getEntryState(entry) {
         const lines = String(entry?.content ?? '').trimStart().split('\n');
         const n = decoratorBlockLength(lines);
@@ -57,6 +61,9 @@
             const t = lines[i].trim();
             if (t === MARK_ONCE) return 'once';
             if (t === MARK_HOLD) return 'hold';
+        }
+        for (let i = 0; i < n; i++) {
+            if (lines[i].trim() === MARK_SUB) return 'sub';
         }
         return 'on';
     }
@@ -71,6 +78,7 @@
         const tail = lines.slice(n);
         if (state === 'hold') head.push(MARK_HOLD);
         if (state === 'once') head.push(MARK_ONCE);
+        if (state === 'sub') head.push(MARK_SUB);
         const next = head.concat(tail).join('\n');
         return next === content ? null : next;
     }
@@ -170,24 +178,91 @@
         return changed;
     }
 
+    /** 데코레이터 블록을 뺀 본문 (엔진이 프롬프트로 쓰는 부분) */
+    function entryBody(entry) {
+        const lines = String(entry?.content ?? '').trimStart().split('\n');
+        const n = decoratorBlockLength(lines);
+        return lines.slice(n).join('\n').replace(/\r\n/g, '\n').trim();
+    }
+
+    function escapeRegex(s) {
+        return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    /**
+     * 보조모델 요청 메시지에서 항목 본문을 찾아내는 정규식.
+     * CBS({{char}} 등)는 치환된 뒤라 정확히 알 수 없으므로, CBS 사이의 리터럴 조각들을
+     * 순서대로 잇되 사이에 최대 400자까지 허용한다. 리터럴이 너무 짧으면 오탐 위험이 커서 포기.
+     */
+    function bodyMatcher(body) {
+        const normalized = body.replace(/\s+/g, ' ').trim();
+        const literals = normalized
+            .split(/\{\{[^{}]*(?:\{\{[^{}]*\}\}[^{}]*)*\}\}/g)
+            .map((l) => l.trim())
+            .filter((l) => l.length > 0);
+        const literalLength = literals.reduce((a, l) => a + l.length, 0);
+        if (literalLength < 12) return null;
+        const parts = literals.map((l) => escapeRegex(l).replace(/ /g, '\\s+'));
+        return new RegExp(parts.join('[\\s\\S]{0,400}?'), 'g');
+    }
+
+    /** 보조모델 요청 메시지 배열에서 sub 항목들을 걷어낸다 */
+    function stripSubEntries(messages, entries) {
+        const matchers = entries.map((e) => bodyMatcher(entryBody(e))).filter(Boolean);
+        if (matchers.length === 0) return { messages, removed: 0 };
+        let removed = 0;
+        const out = [];
+        for (const msg of messages) {
+            if (typeof msg?.content !== 'string' || msg.content.length === 0) {
+                out.push(msg);
+                continue;
+            }
+            let content = msg.content;
+            for (const re of matchers) {
+                re.lastIndex = 0;
+                const next = content.replace(re, () => {
+                    removed++;
+                    return '';
+                });
+                content = next;
+            }
+            if (content === msg.content) {
+                out.push(msg);
+            } else if (content.trim().length === 0 && !msg.multimodals) {
+                // 항목만 담고 있던 메시지는 통째로 제거
+            } else {
+                out.push({ ...msg, content: content.replace(/\n{3,}/g, '\n\n').trim() });
+            }
+        }
+        return { messages: out, removed };
+    }
+
     // ---------------------------------------------------------------
-    // 원샷(이번 턴만) 자동 복구
+    // 원샷(이번 턴만) 자동 복구 + 보조모델 제외
     // ---------------------------------------------------------------
 
     // 로어북은 전송 파이프라인 앞부분에서 한 번 계산되고, 그 뒤에 'process' 훅이
     // 메시지마다 호출된다. 그 시점에 once 마커를 걷어내면 이번 턴에는 빠지고
     // 다음 턴부터 정상 복구된다. 'output' 훅은 빈 메시지 전송 같은 예외 경로용 백업.
     let pendingOnce = false;
+    let hasSub = false;
     let restoring = null;
 
-    async function scanPendingOnce() {
+    async function scanFlags() {
         try {
             const sources = await loadSources();
-            pendingOnce = sources.some((s) =>
-                s.entries.some((e) => isToggleable(e) && getEntryState(e) === 'once')
-            );
+            pendingOnce = false;
+            hasSub = false;
+            for (const s of sources) {
+                for (const e of s.entries) {
+                    if (!isToggleable(e)) continue;
+                    const st = getEntryState(e);
+                    if (st === 'once') pendingOnce = true;
+                    if (st === 'sub') hasSub = true;
+                }
+            }
         } catch (e) {
-            console.log(`once 스캔 실패: ${e?.message ?? e}`);
+            console.log(`상태 스캔 실패: ${e?.message ?? e}`);
         }
     }
 
@@ -216,14 +291,44 @@
         return content;
     };
 
+    // 요청 종류: 'model'(메인 채팅) | 'submodel' | 'otherAx'(루아 axLLM 등) | 'memory' | 'emotion' | 'translate'
+    // - once 복구: 채팅 전송이 아닌 보조모델 단독 호출(삽화 모듈 등)에서도 로어북이 이미 계산된 뒤라 여기서 풀어준다.
+    //   'translate'는 입력 번역처럼 전송 전에 올 수 있어 제외.
+    // - sub 제외: 메인 채팅 요청이 아니면 sub 항목을 메시지에서 걷어낸다.
+    const beforeRequestHandler = async (messages, type) => {
+        try {
+            if (type !== 'translate') {
+                await restoreOnce();
+            }
+            if (type !== 'model' && hasSub && Array.isArray(messages)) {
+                const sources = await loadSources();
+                const subEntries = [];
+                for (const s of sources) {
+                    for (const e of s.entries) {
+                        if (isToggleable(e) && getEntryState(e) === 'sub') subEntries.push(e);
+                    }
+                }
+                const result = stripSubEntries(messages, subEntries);
+                if (result.removed > 0) {
+                    console.log(`보조모델 요청(${type})에서 로어북 ${result.removed}개 제거`);
+                }
+                return result.messages;
+            }
+        } catch (e) {
+            console.log(`beforeRequest 처리 실패: ${e?.message ?? e}`);
+        }
+        return messages;
+    };
+
     await Risuai.addRisuScriptHandler('process', processHandler);
     await Risuai.addRisuScriptHandler('output', outputHandler);
+    await Risuai.addRisuReplacer('beforeRequest', beforeRequestHandler);
 
     // ---------------------------------------------------------------
     // UI
     // ---------------------------------------------------------------
 
-    let offMode = 'hold'; // 'hold' | 'once'  (끄기 버튼이 적용할 상태)
+    let offMode = 'hold'; // 'hold' | 'once' | 'sub'  (끄기 버튼이 적용할 상태)
     let filterText = '';
     let collapsed = new Set();
 
@@ -293,6 +398,8 @@
         .badge.on { background: #1f4d33; color: #8fe2b0; }
         .badge.hold { background: #4d1f2a; color: #f08ea3; }
         .badge.once { background: #4d3b1f; color: #f0c98e; }
+        .badge.sub { background: #1f2f4d; color: #8ec0f0; }
+        .row.sub .title { color: #c9d6e6; text-decoration: none; }
         .row .toggle { min-width: 64px; }
         .empty { padding: 32px 16px; text-align: center; color: #8a8a99; font-size: 13px; }
         footer {
@@ -325,7 +432,7 @@
     }
 
     function badgeLabel(state) {
-        return state === 'on' ? 'ON' : state === 'hold' ? 'OFF' : '1턴 OFF';
+        return state === 'on' ? 'ON' : state === 'hold' ? 'OFF' : state === 'once' ? '1턴 OFF' : '보조 OFF';
     }
 
     let statusText = '';
@@ -339,7 +446,7 @@
         setStatus(label + '…');
         try {
             const n = await fn();
-            await scanPendingOnce();
+            await scanFlags();
             setStatus(typeof n === 'number' ? `${label} 완료 (${n}개 변경)` : `${label} 완료`);
         } catch (e) {
             setStatus(`${label} 실패: ${e?.message ?? e}`);
@@ -394,7 +501,7 @@
                           .map(({ entry, index }) => {
                               const state = getEntryState(entry);
                               return `
-                    <div class="row ${state === 'on' ? '' : 'off'}" data-source="${esc(source.id)}" data-index="${index}">
+                    <div class="row ${state === 'on' ? '' : state === 'sub' ? 'sub' : 'off'}" data-source="${esc(source.id)}" data-index="${index}">
                         <span class="badge ${state}">${badgeLabel(state)}</span>
                         <div class="info">
                             <div class="title">${esc(entryTitle(entry))}</div>
@@ -430,6 +537,7 @@
                 <span class="seg" title="끄기 버튼을 눌렀을 때 적용되는 방식">
                     <button data-mode="hold" class="${offMode === 'hold' ? 'active' : ''}">고정 끄기</button>
                     <button data-mode="once" class="${offMode === 'once' ? 'active' : ''}">이번 턴만 끄기</button>
+                    <button data-mode="sub" class="${offMode === 'sub' ? 'active' : ''}">보조모델만 끄기</button>
                 </span>
                 <input type="text" id="lbt-filter" placeholder="이름 / 키 검색" value="${esc(filterText)}">
                 <button class="danger" data-act="all-off">모두 끄기</button>
@@ -440,7 +548,13 @@
             </div>
             <footer>
                 <span class="status" id="lbt-status">${esc(statusText)}</span>
-                <span>${offMode === 'once' ? '이번 턴만: 다음 전송 때 자동으로 다시 켜져요' : '고정: 다시 켤 때까지 꺼져 있어요'}</span>
+                <span>${
+                    offMode === 'once'
+                        ? '이번 턴만: 다음 메인/보조모델 요청이 나간 뒤 자동으로 다시 켜져요'
+                        : offMode === 'sub'
+                          ? '보조모델만: 메인 채팅엔 들어가고 보조모델(삽화·요약 등) 요청에서만 빠져요'
+                          : '고정: 다시 켤 때까지 꺼져 있어요'
+                }</span>
             </footer>
         </div>`;
 
@@ -533,12 +647,13 @@
         try {
             await Risuai.removeRisuScriptHandler('process', processHandler);
             await Risuai.removeRisuScriptHandler('output', outputHandler);
+            await Risuai.removeRisuReplacer('beforeRequest', beforeRequestHandler);
             if (button && button.id) await Risuai.unregisterUIPart(button.id);
         } catch (e) {
             /* ignore */
         }
     });
 
-    await scanPendingOnce();
+    await scanFlags();
     console.log('Lorebook Toggle 로드 완료');
 })();
