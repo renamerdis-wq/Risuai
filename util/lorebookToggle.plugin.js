@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 1.4.1
+//@version 1.4.2
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -206,8 +206,14 @@
             .filter((l) => l.length > 0);
         const literalLength = literals.reduce((a, l) => a + l.length, 0);
         if (literalLength < 12) return null;
+        // 너무 긴 항목은 정규식이 거대해져 엔진이 거부할 수 있으니 줄 단위 매칭으로 넘긴다
+        if (literalLength > 1500 || literals.length > 60) return null;
         const parts = literals.map((l) => escapeRegex(l).replace(/ /g, '\\s+'));
-        return new RegExp(parts.join('[\\s\\S]{0,400}?'), 'g');
+        try {
+            return new RegExp(parts.join('[\\s\\S]{0,400}?'), 'g');
+        } catch (e) {
+            return null;
+        }
     }
 
     function normalizeLine(line) {
@@ -304,38 +310,48 @@
 
     // 로어북은 전송 파이프라인 앞부분에서 한 번 계산되고, 그 뒤에 'process' 훅이
     // 메시지마다 호출된다. 그 시점에 once 마커를 걷어내면 이번 턴에는 빠지고
-    // 다음 턴부터 정상 복구된다. 'output' 훅은 빈 메시지 전송 같은 예외 경로용 백업.
-    let pendingOnce = false;
+    // 다음 턴부터 정상 복구된다. 응답 뒤에는 타이머로 재확인한다(아래 scheduleRechecks 참고).
     let hasSub = false;
     let restoring = null;
 
-    async function scanFlags() {
+    /** 가벼운 스캔: 로어북 배열만 스냅샷해서 once/sub 마커 유무를 본다 (전체 DB 스냅샷 아님) */
+    async function scanMarkers() {
+        const result = { once: false, sub: false };
         try {
-            const sources = await loadSources();
-            pendingOnce = false;
-            hasSub = false;
-            for (const s of sources) {
-                for (const e of s.entries) {
-                    if (!isToggleable(e)) continue;
-                    const st = getEntryState(e);
-                    if (st === 'once') pendingOnce = true;
-                    if (st === 'sub') hasSub = true;
-                }
+            const entries = await Risuai.getCurrentLorebookEntries();
+            for (const e of entries ?? []) {
+                if (!isToggleable(e)) continue;
+                const st = getEntryState(e);
+                if (st === 'once') result.once = true;
+                if (st === 'sub') result.sub = true;
             }
         } catch (e) {
-            console.log(`상태 스캔 실패: ${e?.message ?? e}`);
+            console.log(`마커 스캔 실패: ${e?.message ?? e}`);
         }
+        hasSub = result.sub;
+        return result;
     }
 
-    async function restoreOnce() {
-        if (!pendingOnce) return;
+    async function scanFlags() {
+        await scanMarkers();
+    }
+
+    /**
+     * once 항목을 켠다. 매번 실제 마커를 다시 확인하므로(플래그에 의존하지 않음),
+     * 다른 트리거가 옛 캐릭터 객체를 되써서 마커가 되살아난 경우에도 다음 기회에 다시 복구된다.
+     */
+    async function restoreOnce(reason) {
         if (restoring) return restoring;
         restoring = (async () => {
             try {
-                await applyStates((entry) => (getEntryState(entry) === 'once' ? 'on' : undefined));
-                pendingOnce = false;
+                const { once } = await scanMarkers();
+                if (!once) return false;
+                const n = await applyStates((entry) => (getEntryState(entry) === 'once' ? 'on' : undefined));
+                pushLog({ time: Date.now(), type: 'restore', reason, restored: n });
+                return n > 0;
             } catch (e) {
                 console.log(`once 복구 실패: ${e?.message ?? e}`);
+                return false;
             } finally {
                 restoring = null;
             }
@@ -343,6 +359,11 @@
         return restoring;
     }
 
+    // 턴이 끝난 뒤의 재확인.
+    // 메인 파이프라인 안('process')에서 복구해도, 그 뒤에 도는 출력 트리거가 파이프라인 시작 때 복제해 둔
+    // 옛 캐릭터 객체를 DB에 되쓰면 마커가 되살아난다(v2 로어북 효과 등). 그래서 응답이 끝난 뒤
+    // 몇 초 간격으로 다시 확인해서 남아 있으면 복구한다. 보조모델 요청(삽화 등)이 방금 있었으면
+    // 버튼 스크립트가 아직 도는 중일 수 있으니 그 동안은 건드리지 않고 미룬다.
     // 메인 채팅 파이프라인 안인지 표시. 'process' 훅은 메인 전송 직전에만 울리고(첫 메시지에도),
     // 'output' 훅은 응답을 받은 뒤 울린다. 그 사이의 type==='model' 요청만 진짜 메인 채팅이고,
     // 그 밖의 'model' 요청은 루아 LLM() 같은 스크립트 호출이므로 보조로 취급한다.
@@ -351,26 +372,47 @@
     let mainChatArmedAt = 0;
     const MAIN_ARM_TTL = 15 * 60 * 1000;
 
-    // once 복구는 캐릭터 객체를 통째로 바꿔치기하는 쓰기라서, 루아 스크립트(삽화 모듈 등)가
-    // 돌아가는 도중에 하면 스크립트가 들고 있던 옛 채팅 객체가 나중에 되돌려지면서 그 사이에
-    // 쓴 채팅 변수가 사라진다. 그래서 보조모델 요청 시점(beforeRequest)에는 절대 복구하지 않고,
-    // 메인 채팅 흐름의 안전한 지점에서만 한다:
-    //   'input'   — 메시지 전송 버튼 직후, 파이프라인·로어북 계산 전 (다음 턴에 바로 켜짐)
-    //   'process' — 메인 파이프라인 안, 로어북 계산 뒤 (재생성/이어쓰기처럼 input이 없는 경로용)
+    let lastAuxAt = 0;
+    const AUX_QUIET_MS = 45 * 1000;
+    const RECHECK_DELAYS = [3000, 8000, 20000, 45000, 90000];
+    let recheckTimers = [];
+
+    function scheduleRechecks() {
+        for (const t of recheckTimers) clearTimeout(t);
+        recheckTimers = RECHECK_DELAYS.map((d) =>
+            setTimeout(async () => {
+                if (mainChatArmed) return;
+                if (Date.now() - lastAuxAt < AUX_QUIET_MS) {
+                    // 보조 호출 직후: 다음 타이머에서 다시 본다
+                    return;
+                }
+                await restoreOnce('턴 종료 후 재확인');
+            }, d)
+        );
+    }
+
+    let processRestoredThisTurn = false;
+
     //   'output'  — 응답 수신 뒤 (백업)
     const inputHandler = async (content) => {
-        await restoreOnce();
+        await restoreOnce('입력 전송 직후');
         return content;
     };
     const processHandler = async (content) => {
+        const wasArmed = mainChatArmed;
         mainChatArmed = true;
         mainChatArmedAt = Date.now();
-        await restoreOnce();
+        if (!wasArmed) processRestoredThisTurn = false;
+        if (!processRestoredThisTurn) {
+            processRestoredThisTurn = true;
+            await restoreOnce('전송 파이프라인 안');
+        }
         return content;
     };
     const outputHandler = async (content) => {
         mainChatArmed = false;
-        await restoreOnce();
+        processRestoredThisTurn = false;
+        scheduleRechecks();
         return content;
     };
 
@@ -397,6 +439,7 @@
         try {
             const armed = mainChatArmed && Date.now() - mainChatArmedAt < MAIN_ARM_TTL;
             log.isMain = type === 'model' && armed;
+            if (!log.isMain) lastAuxAt = Date.now();
             if (!log.isMain && hasSub && Array.isArray(messages)) {
                 const sources = await loadSources();
                 const subEntries = [];
@@ -587,6 +630,7 @@
     }
 
     function typeLabel(item) {
+        if (item.type === 'restore') return `이번 턴만 복구 (${item.reason})`;
         const names = {
             model: '메인 모델',
             submodel: '보조 모델',
@@ -610,6 +654,9 @@
                 const hh = String(t.getHours()).padStart(2, '0');
                 const mm = String(t.getMinutes()).padStart(2, '0');
                 const ss = String(t.getSeconds()).padStart(2, '0');
+                if (item.type === 'restore') {
+                    return `<div class="log-item"><div class="l1"><span>${hh}:${mm}:${ss}</span><span class="tag main">이번 턴만 → 켜짐</span><span>${esc(item.reason)}</span><span>${item.restored}개</span></div></div>`;
+                }
                 const tag = item.isMain
                     ? '<span class="tag main">메인 채팅 · 손대지 않음</span>'
                     : item.results.length === 0
@@ -977,6 +1024,7 @@
 
     await Risuai.onUnload(async () => {
         if (styleTimer) clearInterval(styleTimer);
+        for (const t of recheckTimers) clearTimeout(t);
         try {
             await Risuai.removeRisuScriptHandler('input', inputHandler);
             await Risuai.removeRisuScriptHandler('process', processHandler);
