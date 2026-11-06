@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 1.4.0
+//@version 1.4.1
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -15,7 +15,7 @@
  *   키 매칭/상시활성 여부와 상관없이 그 항목을 비활성 처리한다.
  *   이 플러그인은 항목 내용의 데코레이터 블록 끝에
  *     `@@dont_activate lbtoggle`        (고정: 다시 켤 때까지 꺼짐)
- *     `@@dont_activate lbtoggle once`   (이번 턴만: 다음 메인/보조모델 요청 뒤 자동 복구)
+ *     `@@dont_activate lbtoggle once`   (이번 턴만: 다음 채팅 전송 때 자동 복구)
  *     `@@lbtoggle sub_off`              (보조모델만: 메인 채팅엔 포함, 보조모델 요청에서만 제거)
  *   한 줄을 끼워넣거나 빼는 것만으로 토글한다.
  *   키, 보조키, 삽입 순서, 상시활성, 폴더 등 원래 설정은 전혀 건드리지 않는다.
@@ -351,6 +351,17 @@
     let mainChatArmedAt = 0;
     const MAIN_ARM_TTL = 15 * 60 * 1000;
 
+    // once 복구는 캐릭터 객체를 통째로 바꿔치기하는 쓰기라서, 루아 스크립트(삽화 모듈 등)가
+    // 돌아가는 도중에 하면 스크립트가 들고 있던 옛 채팅 객체가 나중에 되돌려지면서 그 사이에
+    // 쓴 채팅 변수가 사라진다. 그래서 보조모델 요청 시점(beforeRequest)에는 절대 복구하지 않고,
+    // 메인 채팅 흐름의 안전한 지점에서만 한다:
+    //   'input'   — 메시지 전송 버튼 직후, 파이프라인·로어북 계산 전 (다음 턴에 바로 켜짐)
+    //   'process' — 메인 파이프라인 안, 로어북 계산 뒤 (재생성/이어쓰기처럼 input이 없는 경로용)
+    //   'output'  — 응답 수신 뒤 (백업)
+    const inputHandler = async (content) => {
+        await restoreOnce();
+        return content;
+    };
     const processHandler = async (content) => {
         mainChatArmed = true;
         mainChatArmedAt = Date.now();
@@ -372,9 +383,7 @@
     }
 
     // 요청 종류: 'model'(메인 채팅) | 'submodel' | 'otherAx'(루아 axLLM 등) | 'memory' | 'emotion' | 'translate'
-    // - once 복구: 채팅 전송이 아닌 보조모델 단독 호출(삽화 모듈 등)에서도 로어북이 이미 계산된 뒤라 여기서 풀어준다.
-    //   'translate'는 입력 번역처럼 전송 전에 올 수 있어 제외.
-    // - sub 제외: 메인 채팅 요청이 아니면 sub 항목을 메시지에서 걷어낸다.
+    // 여기서는 DB에 아무것도 쓰지 않는다. sub 제외는 메시지 배열만 바꾸는 순수 처리.
     const beforeRequestHandler = async (messages, type) => {
         const log = {
             time: Date.now(),
@@ -386,9 +395,6 @@
             error: null,
         };
         try {
-            if (type !== 'translate') {
-                await restoreOnce();
-            }
             const armed = mainChatArmed && Date.now() - mainChatArmedAt < MAIN_ARM_TTL;
             log.isMain = type === 'model' && armed;
             if (!log.isMain && hasSub && Array.isArray(messages)) {
@@ -416,6 +422,7 @@
         return messages;
     };
 
+    await Risuai.addRisuScriptHandler('input', inputHandler);
     await Risuai.addRisuScriptHandler('process', processHandler);
     await Risuai.addRisuScriptHandler('output', outputHandler);
     await Risuai.addRisuReplacer('beforeRequest', beforeRequestHandler);
@@ -785,7 +792,7 @@
                 <span class="status" id="lbt-status">${esc(statusText)}</span>
                 <span>${
                     offMode === 'once'
-                        ? '이번 턴만: 다음 메인/보조모델 요청이 나간 뒤 자동으로 다시 켜져요'
+                        ? '이번 턴만: 다음 채팅 전송 때 자동으로 다시 켜져요 (삽화 같은 보조 호출만 하면 그때까진 꺼진 채 유지)'
                         : offMode === 'sub'
                           ? '보조모델만: 메인 채팅엔 들어가고 보조모델(삽화·요약 등) 요청에서만 빠져요'
                           : '고정: 다시 켤 때까지 꺼져 있어요'
@@ -971,6 +978,7 @@
     await Risuai.onUnload(async () => {
         if (styleTimer) clearInterval(styleTimer);
         try {
+            await Risuai.removeRisuScriptHandler('input', inputHandler);
             await Risuai.removeRisuScriptHandler('process', processHandler);
             await Risuai.removeRisuScriptHandler('output', outputHandler);
             await Risuai.removeRisuReplacer('beforeRequest', beforeRequestHandler);
