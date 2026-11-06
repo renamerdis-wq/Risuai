@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 1.4.2
+//@version 1.4.3
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -297,10 +297,20 @@
             return { ...msg, content: msg.content.replace(/\n{3,}/g, '\n\n').trim() };
         });
 
+        // 'none'을 둘로 나눈다:
+        //   absent       — 비교할 리터럴은 있었는데 요청 메시지 어디에도 없음 (엔진이 애초에 안 넣은 항목. 정상)
+        //   unverifiable — 본문이 CBS뿐이라 비교할 리터럴 자체가 없음 (들어갔는지 알 수 없음)
+        const results = plans.map((p) => ({
+            entry: p.entry,
+            result:
+                p.result !== 'none' ? p.result : p.re || p.lines.length > 0 ? 'absent' : 'unverifiable',
+        }));
+        const removedEntries = results.filter((r) => r.result === 'full' || r.result === 'partial').length;
         return {
             messages: out,
-            removed,
-            results: plans.map((p) => ({ entry: p.entry, result: p.result })),
+            removed: removedEntries,
+            hits: removed,
+            results,
         };
     }
 
@@ -452,7 +462,7 @@
                 log.removed = result.removed;
                 log.results = result.results.map((r) => ({ name: entryTitle(r.entry), result: r.result }));
                 if (result.removed > 0) {
-                    console.log(`보조모델 요청(${type})에서 로어북 ${result.removed}개 제거`);
+                    console.log(`보조모델 요청(${type})에서 로어북 ${result.removed}개 항목 제거`);
                 }
                 pushLog(log);
                 return result.messages;
@@ -599,6 +609,7 @@
         .log-item .ok { color: #8fe2b0; }
         .log-item .part { color: #f0c98e; }
         .log-item .miss { color: #f08ea3; }
+        .log-item .dim { color: #8a8a99; }
         .log-empty { color: #8a8a99; padding: 6px 0 2px; line-height: 1.5; }
         footer {
             padding: 10px 16px; border-top: 1px solid #2c2c36; font-size: 12px; color: #8a8a99;
@@ -660,18 +671,39 @@
                 const tag = item.isMain
                     ? '<span class="tag main">메인 채팅 · 손대지 않음</span>'
                     : item.results.length === 0
-                      ? '<span class="tag skip">보조 · 걷어낼 항목 없음</span>'
+                      ? '<span class="tag skip">보조 · 보조OFF 항목 없음</span>'
                       : '<span class="tag aux">보조 · 제외 적용</span>';
-                const detail = item.results
-                    .map((r) => {
-                        const cls = r.result === 'full' ? 'ok' : r.result === 'partial' ? 'part' : 'miss';
-                        const mark = r.result === 'full' ? '✓' : r.result === 'partial' ? '△' : '✕';
-                        return `<span class="${cls}">${mark} ${esc(r.name)}</span>`;
-                    })
-                    .join(' · ');
+                const removedList = item.results.filter((r) => r.result === 'full' || r.result === 'partial');
+                const unverifiable = item.results.filter((r) => r.result === 'unverifiable');
+                const absent = item.results.filter((r) => r.result === 'absent' || r.result === 'none');
+                const detailParts = [];
+                if (removedList.length) {
+                    detailParts.push(
+                        removedList
+                            .map((r) =>
+                                r.result === 'full'
+                                    ? `<span class="ok">✓ ${esc(r.name)}</span>`
+                                    : `<span class="part">△ ${esc(r.name)} (일부)</span>`
+                            )
+                            .join(' · ')
+                    );
+                }
+                if (unverifiable.length) {
+                    detailParts.push(
+                        `<span class="miss">? 판별 불가(본문이 CBS뿐): ${unverifiable.map((r) => esc(r.name)).join(', ')}</span>`
+                    );
+                }
+                if (absent.length) {
+                    detailParts.push(
+                        `<span class="dim">－ 요청에 없던 항목 ${absent.length}개 (키워드 미매칭 등, 정상)</span>`
+                    );
+                }
+                const detail = detailParts.join('<br>');
                 return `<div class="log-item">
                     <div class="l1"><span>${hh}:${mm}:${ss}</span><span>${esc(typeLabel(item))}</span>${tag}<span>메시지 ${item.msgCount}개</span>${
-                        item.removed > 0 ? `<span>제거 ${item.removed}</span>` : ''
+                        item.results.length
+                            ? `<span>제거 ${removedList.length}개 · 요청에 없음 ${absent.length}개${unverifiable.length ? ` · 판별 불가 ${unverifiable.length}개` : ''}</span>`
+                            : ''
                     }${item.error ? `<span class="miss">오류: ${esc(item.error)}</span>` : ''}</div>
                     ${detail ? `<div class="l2">${detail}</div>` : ''}
                 </div>`;
@@ -830,7 +862,7 @@
                     <span class="hint">${
                         requestLog.length === 0
                             ? '아직 기록 없음'
-                            : `${requestLog.length}건 · 마지막: ${typeLabel(requestLog[0])}${requestLog[0].removed > 0 ? ` · 제거 ${requestLog[0].removed}` : ''}`
+                            : `${requestLog.length}건 · 마지막: ${typeLabel(requestLog[0])}${requestLog[0].removed > 0 ? ` · 제거 ${requestLog[0].removed}개` : ''}`
                     }</span>
                 </div>
                 ${logOpen ? `<div class="log-body">${renderLog()}</div>` : ''}
