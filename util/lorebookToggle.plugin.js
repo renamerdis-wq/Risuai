@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 2.0.0
+//@version 2.0.1
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -558,6 +558,7 @@
     let expanded = new Set(); // 기본은 모두 접힘. 펼친 그룹만 기록
     let hideDisabledModules = true; // 비활성 모듈 안 보기 (기본 켬)
     let logOpen = false;
+    let logBig = false; // 기록 영역 크게 보기
     const PREF_KEY = 'lbtoggle_prefs';
 
     async function loadPrefs() {
@@ -665,8 +666,11 @@
         .badges { display: flex; flex-direction: column; gap: 3px; align-items: stretch; }
         .row .toggle { min-width: 64px; }
         .empty { padding: 32px 16px; text-align: center; color: #8a8a99; font-size: 13px; }
-        .log { border-top: 1px solid #2c2c36; background: #131318; max-height: 45%; min-height: 0; display: flex; flex-direction: column; flex: 0 1 auto; }
+        .log { border-top: 1px solid #2c2c36; background: #131318; max-height: 50%; min-height: 0; display: flex; flex-direction: column; flex: 0 1 auto; }
+        .log.big { max-height: none; flex: 1 1 auto; }
+        .panel.log-big .list, .panel.log-big .quickbar { display: none; }
         .log-head { flex: 0 0 auto; }
+        .log-head .size { font-weight: 400; font-size: 12px; padding: 3px 8px; }
         .log-head { display: flex; align-items: center; gap: 8px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; user-select: none; }
         .log-head .hint { font-weight: 400; color: #8a8a99; font-size: 12px; flex: 1; }
         .log-body { overflow: auto; min-height: 0; flex: 1 1 auto; padding: 0 16px 10px; font-size: 12px; -webkit-overflow-scrolling: touch; }
@@ -687,6 +691,10 @@
             display: flex; gap: 8px; align-items: center;
         }
         footer .status { flex: 1; }
+        @media (max-width: 600px) {
+            footer { flex-direction: column; align-items: flex-start; gap: 2px; }
+            footer .status:empty { display: none; }
+        }
     `;
 
     function esc(s) {
@@ -941,7 +949,7 @@
             </label>`;
 
         document.body.innerHTML = `<style>${STYLE}</style>
-        <div class="panel">
+        <div class="panel ${logOpen && logBig ? 'log-big' : ''}">
             <header>
                 <h1>📕 로어북 토글 <span style="font-weight:400;color:#8a8a99;font-size:13px">총 ${total.all}개 · OFF ${total.off} · 보조 제외 ${total.sub}</span></h1>
                 <button class="ghost" id="lbt-close" title="닫기">✕</button>
@@ -960,13 +968,14 @@
             <div class="list">
                 ${groupsHtml || '<div class="empty">표시할 로어북 항목이 없어요.</div>'}
             </div>
-            <div class="log">
+            <div class="log ${logOpen && logBig ? 'big' : ''}">
                 <div class="log-head" id="lbt-log-toggle">${logOpen ? '▾' : '▸'} 최근 요청 기록
                     <span class="hint">${
                         requestLog.length === 0
                             ? '아직 기록 없음'
                             : `${requestLog.length}건 · 마지막: ${typeLabel(requestLog[0])}${requestLog[0].removed > 0 ? ` · 제거 ${requestLog[0].removed}개` : ''}`
                     }</span>
+                    ${logOpen ? `<button class="size" id="lbt-log-size">${logBig ? '작게 보기' : '크게 보기'}</button>` : ''}
                 </div>
                 ${logOpen ? `<div class="log-body">${renderLog()}</div>` : ''}
             </div>
@@ -999,6 +1008,14 @@
         if (logToggle) {
             logToggle.onclick = () => {
                 logOpen = !logOpen;
+                render();
+            };
+        }
+        const logSize = document.getElementById('lbt-log-size');
+        if (logSize) {
+            logSize.onclick = (ev) => {
+                ev.stopPropagation(); // 제목 클릭(접기)과 분리
+                logBig = !logBig;
                 render();
             };
         }
