@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 1.4.3
+//@version 1.5.0
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -15,7 +15,7 @@
  *   키 매칭/상시활성 여부와 상관없이 그 항목을 비활성 처리한다.
  *   이 플러그인은 항목 내용의 데코레이터 블록 끝에
  *     `@@dont_activate lbtoggle`        (고정: 다시 켤 때까지 꺼짐)
- *     `@@dont_activate lbtoggle once`   (이번 턴만: 다음 채팅 전송 때 자동 복구)
+ *     `@@dont_activate lbtoggle once`   (이번 턴만: 다음 요청 하나가 빠진 채 나간 뒤 자동 복구)
  *     `@@lbtoggle sub_off`              (보조모델만: 메인 채팅엔 포함, 보조모델 요청에서만 제거)
  *   한 줄을 끼워넣거나 빼는 것만으로 토글한다.
  *   키, 보조키, 삽입 순서, 상시활성, 폴더 등 원래 설정은 전혀 건드리지 않는다.
@@ -350,14 +350,33 @@
      * once 항목을 켠다. 매번 실제 마커를 다시 확인하므로(플래그에 의존하지 않음),
      * 다른 트리거가 옛 캐릭터 객체를 되써서 마커가 되살아난 경우에도 다음 기회에 다시 복구된다.
      */
+    // "복구할 빚"이 생긴 시각. once가 걸린 채로 요청이 실제로 나갔을 때 기록된다.
+    //   - 메인 채팅: 응답을 받은 시점('output' 훅)
+    //   - 보조 호출(삽화 등): 그 요청이 once 마커를 본 시점
+    // 사용자가 패널에서 뭔가 끈 시각이 이보다 뒤면, 그 토글은 아직 소비되지 않은 것이므로 복구하지 않는다.
+    let restoreOwedAt = 0;
+    let lastUserToggleAt = 0;
+    let onceConsumedByAux = false;
+
+    function restoreIsDue() {
+        return restoreOwedAt > 0 && restoreOwedAt >= lastUserToggleAt;
+    }
+
     async function restoreOnce(reason) {
         if (restoring) return restoring;
         restoring = (async () => {
             try {
+                if (!restoreIsDue()) return false;
                 const { once } = await scanMarkers();
-                if (!once) return false;
+                if (!once) {
+                    onceConsumedByAux = false;
+                    return false;
+                }
                 const n = await applyStates((entry) => (getEntryState(entry) === 'once' ? 'on' : undefined));
                 pushLog({ time: Date.now(), type: 'restore', reason, restored: n });
+                // restoreOwedAt은 여기서 지우지 않는다: 트리거가 옛 캐릭터를 되써 마커가 되살아나면
+                // 타이머 재확인이 같은 빚으로 다시 복구해야 한다. 사용자가 새로 끄면 lastUserToggleAt이 더 최신이 되어 멈춘다.
+                if (n > 0) onceConsumedByAux = false;
                 return n > 0;
             } catch (e) {
                 console.log(`once 복구 실패: ${e?.message ?? e}`);
@@ -382,20 +401,27 @@
     let mainChatArmedAt = 0;
     const MAIN_ARM_TTL = 15 * 60 * 1000;
 
+    // 타이머 복구는 "응답 뒤 트리거가 옛 캐릭터를 되써서 마커가 되살아난" 경우만을 위한 것이다.
+    // 보조 호출(삽화 등)이 그 뒤에 한 번이라도 있었으면 타이머는 절대 복구하지 않는다:
+    // 삽화 생성은 몇 분씩 걸릴 수 있고, 그 도중에 캐릭터 객체를 바꾸면 스크립트가 쓴 채팅 변수가 사라져
+    // 이미지 생성이 깨진다. 그 경우 복구는 사용자가 다음 메시지를 보낼 때(입력 직전)만 한다.
     let lastAuxAt = 0;
-    const AUX_QUIET_MS = 45 * 1000;
     const RECHECK_DELAYS = [3000, 8000, 20000, 45000, 90000];
     let recheckTimers = [];
+    let rechecksScheduledAt = 0;
+
+    function cancelRechecks() {
+        for (const t of recheckTimers) clearTimeout(t);
+        recheckTimers = [];
+    }
 
     function scheduleRechecks() {
-        for (const t of recheckTimers) clearTimeout(t);
+        cancelRechecks();
+        rechecksScheduledAt = Date.now();
         recheckTimers = RECHECK_DELAYS.map((d) =>
             setTimeout(async () => {
                 if (mainChatArmed) return;
-                if (Date.now() - lastAuxAt < AUX_QUIET_MS) {
-                    // 보조 호출 직후: 다음 타이머에서 다시 본다
-                    return;
-                }
+                if (lastAuxAt >= rechecksScheduledAt) return; // 그 사이 보조 호출이 있었음 → 건드리지 않음
                 await restoreOnce('턴 종료 후 재확인');
             }, d)
         );
@@ -404,8 +430,13 @@
     let processRestoredThisTurn = false;
 
     //   'output'  — 응답 수신 뒤 (백업)
+    // "이번 턴만"의 뜻: 다음 요청 하나(채팅이든 삽화 같은 보조 호출이든)가 빠진 채 나간 *뒤에* 켠다.
+    //   input   — 보조 호출이 먼저 once를 소비한 경우에만, 이번 전송 전에 복구 (그래야 이 전송엔 들어감)
+    //   process — 위와 같은 경우의 백업 (입력창을 거치지 않는 재생성 등). 그 외엔 절대 복구하지 않음:
+    //             '생각의 사슬'처럼 첫 파이프라인을 멈추고 다시 보내는 모듈이 있으면 진짜 요청은 나중에 나간다.
+    //   output  — 메인 요청이 once 빠진 채 나갔으니 응답을 받은 뒤 복구. 트리거 되쓰기에 대비해 타이머로 재확인.
     const inputHandler = async (content) => {
-        await restoreOnce('입력 전송 직후');
+        if (onceConsumedByAux) await restoreOnce('입력 전송 직전 (보조 호출이 먼저 사용함)');
         return content;
     };
     const processHandler = async (content) => {
@@ -415,13 +446,15 @@
         if (!wasArmed) processRestoredThisTurn = false;
         if (!processRestoredThisTurn) {
             processRestoredThisTurn = true;
-            await restoreOnce('전송 파이프라인 안');
+            if (onceConsumedByAux) await restoreOnce('전송 파이프라인 안 (보조 호출이 먼저 사용함)');
         }
         return content;
     };
     const outputHandler = async (content) => {
         mainChatArmed = false;
         processRestoredThisTurn = false;
+        restoreOwedAt = Date.now();
+        await restoreOnce('응답 수신 뒤');
         scheduleRechecks();
         return content;
     };
@@ -449,7 +482,19 @@
         try {
             const armed = mainChatArmed && Date.now() - mainChatArmedAt < MAIN_ARM_TTL;
             log.isMain = type === 'model' && armed;
-            if (!log.isMain) lastAuxAt = Date.now();
+            if (!log.isMain) {
+                lastAuxAt = Date.now();
+                cancelRechecks(); // 보조 호출 중엔 타이머 복구 금지
+                // 보조 호출이 once 마커가 걸린 채로 나가면 그 호출이 once를 소비한 것. 여기서는 DB에 쓰지 않고
+                // 빚만 기록해 둔다 (버튼 스크립트가 아직 도는 중일 수 있어서). 복구는 다음 입력/파이프라인에서.
+                if (type === 'submodel' || type === 'otherAx' || type === 'model') {
+                    const { once } = await scanMarkers();
+                    if (once) {
+                        onceConsumedByAux = true;
+                        restoreOwedAt = Date.now();
+                    }
+                }
+            }
             if (!log.isMain && hasSub && Array.isArray(messages)) {
                 const sources = await loadSources();
                 const subEntries = [];
@@ -530,7 +575,7 @@
             padding: 16px;
         }
         .panel {
-            width: min(720px, 100%); max-height: 100%;
+            width: min(720px, 100%); height: 100%;
             background: #16161c; border: 1px solid #2c2c36; border-radius: 14px;
             display: flex; flex-direction: column; overflow: hidden;
             box-shadow: 0 20px 60px rgba(0,0,0,.5);
@@ -567,7 +612,7 @@
         .quick { display: inline-flex; align-items: center; gap: 6px; }
         .quick-label { font-size: 12.5px; color: #b0b0bd; }
         .quick button { padding: 4px 9px; font-size: 12.5px; }
-        .list { overflow: auto; flex: 1; }
+        .list { overflow: auto; flex: 1 1 auto; min-height: 0; }
         .group { border-bottom: 1px solid #22222a; }
         .group-head {
             position: sticky; top: 0; z-index: 1;
@@ -595,10 +640,11 @@
         .row.sub .title { color: #c9d6e6; text-decoration: none; }
         .row .toggle { min-width: 64px; }
         .empty { padding: 32px 16px; text-align: center; color: #8a8a99; font-size: 13px; }
-        .log { border-top: 1px solid #2c2c36; background: #131318; max-height: 38%; display: flex; flex-direction: column; }
+        .log { border-top: 1px solid #2c2c36; background: #131318; max-height: 45%; min-height: 0; display: flex; flex-direction: column; flex: 0 1 auto; }
+        .log-head { flex: 0 0 auto; }
         .log-head { display: flex; align-items: center; gap: 8px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; user-select: none; }
         .log-head .hint { font-weight: 400; color: #8a8a99; font-size: 12px; flex: 1; }
-        .log-body { overflow: auto; padding: 0 16px 10px; font-size: 12px; }
+        .log-body { overflow: auto; min-height: 0; flex: 1 1 auto; padding: 0 16px 10px; font-size: 12px; -webkit-overflow-scrolling: touch; }
         .log-item { padding: 6px 0; border-top: 1px solid #1f1f27; color: #c8c8d2; }
         .log-item .l1 { display: flex; gap: 8px; flex-wrap: wrap; }
         .log-item .tag { padding: 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 600; }
@@ -726,6 +772,7 @@
         setStatus(label + '…');
         try {
             const n = await fn();
+            lastUserToggleAt = Date.now();
             await scanFlags();
             setStatus(typeof n === 'number' ? `${label} 완료 (${n}개 변경)` : `${label} 완료`);
         } catch (e) {
@@ -871,7 +918,7 @@
                 <span class="status" id="lbt-status">${esc(statusText)}</span>
                 <span>${
                     offMode === 'once'
-                        ? '이번 턴만: 다음 채팅 전송 때 자동으로 다시 켜져요 (삽화 같은 보조 호출만 하면 그때까진 꺼진 채 유지)'
+                        ? '이번 턴만: 다음 요청 하나(채팅 또는 삽화 같은 보조 호출)가 빠진 채 나간 뒤 자동으로 켜져요'
                         : offMode === 'sub'
                           ? '보조모델만: 메인 채팅엔 들어가고 보조모델(삽화·요약 등) 요청에서만 빠져요'
                           : '고정: 다시 켤 때까지 꺼져 있어요'
@@ -1056,7 +1103,7 @@
 
     await Risuai.onUnload(async () => {
         if (styleTimer) clearInterval(styleTimer);
-        for (const t of recheckTimers) clearTimeout(t);
+        cancelRechecks();
         try {
             await Risuai.removeRisuScriptHandler('input', inputHandler);
             await Risuai.removeRisuScriptHandler('process', processHandler);
