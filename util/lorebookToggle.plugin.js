@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 1.6.0
+//@version 2.0.0
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -16,7 +16,8 @@
  *   이 플러그인은 항목 내용의 데코레이터 블록 끝에
  *     `@@dont_activate lbtoggle`        (고정: 다시 켤 때까지 꺼짐)
  *     `@@dont_activate lbtoggle once`   (이번 턴만: 다음 요청 하나가 빠진 채 나간 뒤 자동 복구)
- *     `@@lbtoggle sub_off`              (보조모델만: 메인 채팅엔 포함, 보조모델 요청에서만 제거)
+ *     `@@lbtoggle sub_off`              (보조모델 제외: 메인 채팅엔 포함, 보조모델 요청에서만 제거)
+ *   메인 축(ON / 고정 OFF / 이번 턴만 OFF)과 보조 축(포함 / 제외)은 서로 독립이라 함께 걸릴 수 있다.
  *   한 줄을 끼워넣거나 빼는 것만으로 토글한다.
  *   키, 보조키, 삽입 순서, 상시활성, 폴더 등 원래 설정은 전혀 건드리지 않는다.
  *   상태가 항목 내용 자체에 들어있으므로 별도 저장소 없이 세이브 파일과 함께 동기화된다.
@@ -63,51 +64,40 @@
         return t === MARK_HOLD || t === MARK_ONCE || t === MARK_ONCE_SUB || t === MARK_SUB;
     }
 
-    /** 'on' | 'hold' | 'once' | 'sub' */
-    function getEntryState(entry) {
+    function markLines(entry) {
         const lines = String(entry?.content ?? '').trimStart().split('\n');
         const n = decoratorBlockLength(lines);
-        for (let i = 0; i < n; i++) {
-            const t = lines[i].trim();
+        return lines.slice(0, n).map((l) => l.trim());
+    }
+
+    /** 메인 축: 'on' | 'hold' | 'once' (로어북 엔진에 작용) */
+    function getEntryState(entry) {
+        for (const t of markLines(entry)) {
             if (t === MARK_ONCE || t === MARK_ONCE_SUB) return 'once';
             if (t === MARK_HOLD) return 'hold';
         }
-        for (let i = 0; i < n; i++) {
-            if (lines[i].trim() === MARK_SUB) return 'sub';
-        }
         return 'on';
     }
 
-    /** once 항목이 복구될 때 돌아갈 상태: 'sub' | 'on' */
-    function onceRestoreTarget(entry) {
-        const lines = String(entry?.content ?? '').trimStart().split('\n');
-        const n = decoratorBlockLength(lines);
-        for (let i = 0; i < n; i++) {
-            if (lines[i].trim() === MARK_ONCE_SUB) return 'sub';
-        }
-        return 'on';
+    /** 보조 축: 보조모델 요청에서 제외되는 항목인지 (메인 축과 독립) */
+    function isSubOff(entry) {
+        return markLines(entry).some((t) => t === MARK_SUB || t === MARK_ONCE_SUB);
     }
 
-    /** 끄기 버튼이 적용할 상태. 보조OFF 항목에 once를 걸면 복구 시 보조OFF로 돌아가도록 oncesub */
-    function offStateFor(entry, mode) {
-        const cur = getEntryState(entry);
-        if (mode === 'once' && cur === 'sub') return 'oncesub';
-        return mode;
-    }
-
-    /** 항목 내용을 원하는 상태로 바꾼 새 content 반환. 변화 없으면 null
-     *  state: 'on' | 'hold' | 'once' | 'oncesub' | 'sub' */
-    function withEntryState(content, state) {
+    /**
+     * 두 축의 상태로 마커 줄을 다시 쓴 content 반환. 변화 없으면 null
+     *   main: 'on' | 'hold' | 'once'   sub: boolean
+     */
+    function withEntryMarkers(content, main, sub) {
         // 엔진이 내용을 trim한 뒤 파싱하므로, 앞쪽 빈 줄은 걷어내고 데코레이터 블록을 찾는다
         const lines = String(content ?? '').split('\n');
         while (lines.length > 0 && lines[0].trim() === '') lines.shift();
         const n = decoratorBlockLength(lines);
         const head = lines.slice(0, n).filter((l) => !isMarkLine(l));
         const tail = lines.slice(n);
-        if (state === 'hold') head.push(MARK_HOLD);
-        if (state === 'once') head.push(MARK_ONCE);
-        if (state === 'oncesub') head.push(MARK_ONCE_SUB);
-        if (state === 'sub') head.push(MARK_SUB);
+        if (main === 'hold') head.push(MARK_HOLD);
+        if (main === 'once') head.push(MARK_ONCE);
+        if (sub) head.push(MARK_SUB);
         const next = head.concat(tail).join('\n');
         return next === content ? null : next;
     }
@@ -196,8 +186,10 @@
             const entries = source.entries.map((entry, index) => {
                 if (!isToggleable(entry)) return entry;
                 const want = decide(entry, source.id, index);
-                if (want === undefined) return entry;
-                const next = withEntryState(entry.content, want);
+                if (!want) return entry;
+                const main = want.main ?? getEntryState(entry);
+                const sub = want.sub ?? isSubOff(entry);
+                const next = withEntryMarkers(entry.content, main, sub);
                 if (next === null) return entry;
                 dirty = true;
                 changed++;
@@ -359,9 +351,8 @@
             const entries = await Risuai.getCurrentLorebookEntries();
             for (const e of entries ?? []) {
                 if (!isToggleable(e)) continue;
-                const st = getEntryState(e);
-                if (st === 'once') result.once = true;
-                if (st === 'sub') result.sub = true;
+                if (getEntryState(e) === 'once') result.once = true;
+                if (isSubOff(e)) result.sub = true;
             }
         } catch (e) {
             console.log(`마커 스캔 실패: ${e?.message ?? e}`);
@@ -400,9 +391,7 @@
                     onceConsumedByAux = false;
                     return false;
                 }
-                const n = await applyStates((entry) =>
-                    getEntryState(entry) === 'once' ? onceRestoreTarget(entry) : undefined
-                );
+                const n = await applyStates((entry) => (getEntryState(entry) === 'once' ? { main: 'on' } : undefined));
                 pushLog({ time: Date.now(), type: 'restore', reason, restored: n });
                 // restoreOwedAt은 여기서 지우지 않는다: 트리거가 옛 캐릭터를 되써 마커가 되살아나면
                 // 타이머 재확인이 같은 빚으로 다시 복구해야 한다. 사용자가 새로 끄면 lastUserToggleAt이 더 최신이 되어 멈춘다.
@@ -532,7 +521,7 @@
                 const subEntries = [];
                 for (const s of sources) {
                     for (const e of s.entries) {
-                        if (isToggleable(e) && getEntryState(e) === 'sub') subEntries.push(e);
+                        if (isToggleable(e) && isSubOff(e)) subEntries.push(e);
                     }
                 }
                 const result = stripSubEntries(messages, subEntries);
@@ -672,7 +661,8 @@
         .badge.hold { background: #4d1f2a; color: #f08ea3; }
         .badge.once { background: #4d3b1f; color: #f0c98e; }
         .badge.sub { background: #1f2f4d; color: #8ec0f0; }
-        .row.sub .title { color: #c9d6e6; text-decoration: none; }
+        .badge.sub.faint { background: transparent; color: #4e5566; border: 1px dashed #2f3340; }
+        .badges { display: flex; flex-direction: column; gap: 3px; align-items: stretch; }
         .row .toggle { min-width: 64px; }
         .empty { padding: 32px 16px; text-align: center; color: #8a8a99; font-size: 13px; }
         .log { border-top: 1px solid #2c2c36; background: #131318; max-height: 45%; min-height: 0; display: flex; flex-direction: column; flex: 0 1 auto; }
@@ -718,7 +708,6 @@
         if (entry.alwaysActive) parts.push('상시');
         else if (entry.key) parts.push('키: ' + entry.key);
         if (entry.selective && entry.secondkey) parts.push('보조: ' + entry.secondkey);
-        if (getEntryState(entry) === 'once' && onceRestoreTarget(entry) === 'sub') parts.push('복구되면 보조 OFF');
         return parts.join(' · ');
     }
 
@@ -795,14 +784,30 @@
             .join('');
     }
 
-    /** 끄기 일괄 적용 대상인지: ON 항목, 그리고 once 모드일 때는 보조OFF 항목도 (복구 시 보조OFF로 복귀) */
-    function canApplyOff(entry) {
-        const cur = getEntryState(entry);
-        return cur === 'on' || (cur === 'sub' && offMode === 'once');
+    // 모드에 따라 "끄기/켜기" 버튼이 건드리는 축이 달라진다.
+    //   hold / once → 메인 축만 (보조 축 그대로)
+    //   sub         → 보조 축만 (메인 축 그대로)
+    function offDecide(entry) {
+        if (offMode === 'sub') return isSubOff(entry) ? undefined : { sub: true };
+        return getEntryState(entry) === 'on' ? { main: offMode } : undefined;
+    }
+    function onDecide(entry) {
+        if (offMode === 'sub') return isSubOff(entry) ? { sub: false } : undefined;
+        return getEntryState(entry) !== 'on' ? { main: 'on' } : undefined;
+    }
+    function rowDecide(entry) {
+        if (offMode === 'sub') return { sub: !isSubOff(entry) };
+        return getEntryState(entry) === 'on' ? { main: offMode } : { main: 'on' };
+    }
+    function offWord() {
+        return offMode === 'sub' ? '보조 제외' : '끄기';
+    }
+    function onWord() {
+        return offMode === 'sub' ? '보조 포함' : '켜기';
     }
 
     function badgeLabel(state) {
-        return state === 'on' ? 'ON' : state === 'hold' ? 'OFF' : state === 'once' ? '1턴 OFF' : '보조 OFF';
+        return state === 'on' ? 'ON' : state === 'hold' ? 'OFF' : '1턴 OFF';
     }
 
     let statusText = '';
@@ -861,7 +866,7 @@
         sources = sources.filter(isVisibleSource);
         const visibleSourceIds = new Set(sources.map((src) => src.id));
 
-        const total = { all: 0, off: 0 };
+        const total = { all: 0, off: 0, sub: 0 };
         const groupsHtml = sources
             .map((source) => {
                 const folderNames = new Map();
@@ -874,8 +879,10 @@
                 if (items.length === 0) return '';
 
                 const offCount = items.filter(({ entry }) => getEntryState(entry) !== 'on').length;
+                const subCount = items.filter(({ entry }) => isSubOff(entry)).length;
                 total.all += items.length;
                 total.off += offCount;
+                total.sub += subCount;
                 const isCollapsed = !expanded.has(source.id);
 
                 const rows = isCollapsed
@@ -883,15 +890,20 @@
                     : items
                           .map(({ entry, index }) => {
                               const state = getEntryState(entry);
+                              const sub = isSubOff(entry);
+                              const rowIsOff = offMode === 'sub' ? sub : state !== 'on';
                               return `
-                    <div class="row ${state === 'on' ? '' : state === 'sub' ? 'sub' : 'off'}" data-source="${esc(source.id)}" data-index="${index}">
-                        <span class="badge ${state}">${badgeLabel(state)}</span>
+                    <div class="row ${state === 'on' ? '' : 'off'}" data-source="${esc(source.id)}" data-index="${index}">
+                        <span class="badges">
+                            <span class="badge ${state}">${badgeLabel(state)}</span>
+                            <span class="badge sub ${sub ? '' : 'faint'}">${sub ? '보조 제외' : '보조 포함'}</span>
+                        </span>
                         <div class="info">
                             <div class="title">${esc(entryTitle(entry))}</div>
                             <div class="meta">${esc(entryMeta(entry, folderNames))}</div>
                         </div>
-                        <button class="toggle ${state === 'on' || (state === 'sub' && offMode === 'once') ? 'danger' : 'good'}" data-act="toggle">
-                            ${state === 'on' ? '끄기' : state === 'sub' && offMode === 'once' ? '1턴 끄기' : '켜기'}
+                        <button class="toggle ${rowIsOff ? 'good' : 'danger'}" data-act="toggle">
+                            ${rowIsOff ? onWord() : offWord()}
                         </button>
                     </div>`;
                           })
@@ -901,9 +913,9 @@
                 <div class="group" data-source="${esc(source.id)}">
                     <div class="group-head">
                         <span class="name" data-act="collapse">${isCollapsed ? '▸' : '▾'} ${esc(source.label)}
-                            <span class="count">(${items.length}개, OFF ${offCount})</span></span>
-                        <button class="danger" data-act="group-off">전체 끄기</button>
-                        <button class="good" data-act="group-on">전체 켜기</button>
+                            <span class="count">(${items.length}개 · OFF ${offCount} · 보조 제외 ${subCount})</span></span>
+                        <button class="danger" data-act="group-off">전체 ${offWord()}</button>
+                        <button class="good" data-act="group-on">전체 ${onWord()}</button>
                     </div>
                     ${rows}
                 </div>`;
@@ -918,8 +930,8 @@
                 (cat) => `
                 <span class="quick">
                     <span class="quick-label">${esc(cat.label)}</span>
-                    <button class="danger" data-cat-off="${cat.id}">끄기</button>
-                    <button class="good" data-cat-on="${cat.id}">켜기</button>
+                    <button class="danger" data-cat-off="${cat.id}">${offWord()}</button>
+                    <button class="good" data-cat-on="${cat.id}">${onWord()}</button>
                 </span>`
             )
             .join('') +
@@ -931,18 +943,18 @@
         document.body.innerHTML = `<style>${STYLE}</style>
         <div class="panel">
             <header>
-                <h1>📕 로어북 토글 <span style="font-weight:400;color:#8a8a99;font-size:13px">총 ${total.all}개 · OFF ${total.off}</span></h1>
+                <h1>📕 로어북 토글 <span style="font-weight:400;color:#8a8a99;font-size:13px">총 ${total.all}개 · OFF ${total.off} · 보조 제외 ${total.sub}</span></h1>
                 <button class="ghost" id="lbt-close" title="닫기">✕</button>
             </header>
             <div class="toolbar">
-                <span class="seg" title="끄기 버튼을 눌렀을 때 적용되는 방식">
+                <span class="seg" title="아래 버튼들이 어느 축을 건드릴지">
                     <button data-mode="hold" class="${offMode === 'hold' ? 'active' : ''}">고정 끄기</button>
                     <button data-mode="once" class="${offMode === 'once' ? 'active' : ''}">이번 턴만 끄기</button>
-                    <button data-mode="sub" class="${offMode === 'sub' ? 'active' : ''}">보조모델만 끄기</button>
+                    <button data-mode="sub" class="${offMode === 'sub' ? 'active' : ''}">보조모델 제외</button>
                 </span>
                 <input type="text" id="lbt-filter" placeholder="이름 / 키 검색" value="${esc(filterText)}">
-                <button class="danger" data-act="all-off">모두 끄기</button>
-                <button class="good" data-act="all-on">모두 켜기</button>
+                <button class="danger" data-act="all-off">모두 ${offWord()}</button>
+                <button class="good" data-act="all-on">모두 ${onWord()}</button>
             </div>
             <div class="toolbar quickbar">${quickHtml}</div>
             <div class="list">
@@ -962,10 +974,10 @@
                 <span class="status" id="lbt-status">${esc(statusText)}</span>
                 <span>${
                     offMode === 'once'
-                        ? '이번 턴만: 다음 요청 하나(채팅 또는 삽화 같은 보조 호출)가 빠진 채 나간 뒤 자동으로 켜져요'
+                        ? '이번 턴만: 다음 요청 하나(채팅 또는 삽화 같은 보조 호출)가 빠진 채 나간 뒤 자동으로 켜져요. 보조 축은 안 건드려요'
                         : offMode === 'sub'
-                          ? '보조모델만: 메인 채팅엔 들어가고 보조모델(삽화·요약 등) 요청에서만 빠져요'
-                          : '고정: 다시 켤 때까지 꺼져 있어요'
+                          ? '보조모델 제외: 메인 상태와 별개예요. 제외된 항목은 메인 채팅엔 들어가고 보조모델(삽화·요약 등) 요청에서만 빠져요'
+                          : '고정: 다시 켤 때까지 꺼져 있어요. 보조 축은 안 건드려요'
                 }</span>
             </footer>
         </div>`;
@@ -1018,33 +1030,25 @@
 
         const visible = (sid) => visibleSourceIds.has(sid);
         document.querySelector('[data-act="all-off"]').onclick = () =>
-            act('모두 끄기', () =>
-                applyStates((entry, sid) =>
-                    visible(sid) && matchesFilter(entry) && canApplyOff(entry) ? offStateFor(entry, offMode) : undefined
-                )
+            act(`모두 ${offWord()}`, () =>
+                applyStates((entry, sid) => (visible(sid) && matchesFilter(entry) ? offDecide(entry) : undefined))
             );
         document.querySelector('[data-act="all-on"]').onclick = () =>
-            act('모두 켜기', () =>
-                applyStates((entry, sid) =>
-                    visible(sid) && matchesFilter(entry) && getEntryState(entry) !== 'on' ? 'on' : undefined
-                )
+            act(`모두 ${onWord()}`, () =>
+                applyStates((entry, sid) => (visible(sid) && matchesFilter(entry) ? onDecide(entry) : undefined))
             );
 
         presentCategories.forEach((cat) => {
             document.querySelector(`[data-cat-off="${cat.id}"]`).onclick = () =>
-                act(`${cat.label} 끄기`, () =>
+                act(`${cat.label} ${offWord()}`, () =>
                     applyStates((entry, sid) =>
-                        visible(sid) && cat.test(sid) && matchesFilter(entry) && canApplyOff(entry)
-                            ? offStateFor(entry, offMode)
-                            : undefined
+                        visible(sid) && cat.test(sid) && matchesFilter(entry) ? offDecide(entry) : undefined
                     )
                 );
             document.querySelector(`[data-cat-on="${cat.id}"]`).onclick = () =>
-                act(`${cat.label} 켜기`, () =>
+                act(`${cat.label} ${onWord()}`, () =>
                     applyStates((entry, sid) =>
-                        visible(sid) && cat.test(sid) && matchesFilter(entry) && getEntryState(entry) !== 'on'
-                            ? 'on'
-                            : undefined
+                        visible(sid) && cat.test(sid) && matchesFilter(entry) ? onDecide(entry) : undefined
                     )
                 );
         });
@@ -1057,16 +1061,12 @@
                 render();
             };
             groupEl.querySelector('[data-act="group-off"]').onclick = () =>
-                act('그룹 끄기', () =>
-                    applyStates((entry, sid) =>
-                        sid === sourceId && matchesFilter(entry) && canApplyOff(entry) ? offStateFor(entry, offMode) : undefined
-                    )
+                act(`그룹 ${offWord()}`, () =>
+                    applyStates((entry, sid) => (sid === sourceId && matchesFilter(entry) ? offDecide(entry) : undefined))
                 );
             groupEl.querySelector('[data-act="group-on"]').onclick = () =>
-                act('그룹 켜기', () =>
-                    applyStates((entry, sid) =>
-                        sid === sourceId && matchesFilter(entry) && getEntryState(entry) !== 'on' ? 'on' : undefined
-                    )
+                act(`그룹 ${onWord()}`, () =>
+                    applyStates((entry, sid) => (sid === sourceId && matchesFilter(entry) ? onDecide(entry) : undefined))
                 );
         });
 
@@ -1077,10 +1077,7 @@
                 act('변경', () =>
                     applyStates((entry, sid, i) => {
                         if (sid !== sourceId || i !== index) return undefined;
-                        const cur = getEntryState(entry);
-                        if (cur === 'on') return offMode;
-                        if (cur === 'sub' && offMode === 'once') return 'oncesub';
-                        return 'on';
+                        return rowDecide(entry);
                     })
                 );
         });
