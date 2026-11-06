@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 1.5.2
+//@version 1.6.0
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -28,9 +28,18 @@
  */
 
 (async () => {
+    // 요청 훅은 가장 먼저 등록한다. 같은 훅을 쓰는 다른 플러그인(로어 모니터 등)보다 앞서 돌아야
+    // 그쪽이 "걷어낸 뒤" 메시지를 보게 된다. 실제 처리 함수는 아래에서 나중에 연결한다.
+    let beforeRequestImpl = null;
+    const beforeRequestEntry = async (messages, type) =>
+        beforeRequestImpl ? beforeRequestImpl(messages, type) : messages;
+    await Risuai.addRisuReplacer('beforeRequest', beforeRequestEntry);
+
     const MARK_BASE = '@@dont_activate lbtoggle';
     const MARK_HOLD = MARK_BASE;
     const MARK_ONCE = MARK_BASE + ' once';
+    // 보조OFF 항목에 once를 건 경우: 복구하면 ON이 아니라 보조OFF로 돌아간다
+    const MARK_ONCE_SUB = MARK_BASE + ' once sub';
     // 메인 채팅엔 그대로 들어가고, 보조모델 요청에서만 걷어내는 항목 표시.
     // 엔진이 모르는 데코레이터라 프롬프트에서는 그냥 제거된다.
     const MARK_SUB = '@@lbtoggle sub_off';
@@ -51,7 +60,7 @@
 
     function isMarkLine(line) {
         const t = line.trim();
-        return t === MARK_HOLD || t === MARK_ONCE || t === MARK_SUB;
+        return t === MARK_HOLD || t === MARK_ONCE || t === MARK_ONCE_SUB || t === MARK_SUB;
     }
 
     /** 'on' | 'hold' | 'once' | 'sub' */
@@ -60,7 +69,7 @@
         const n = decoratorBlockLength(lines);
         for (let i = 0; i < n; i++) {
             const t = lines[i].trim();
-            if (t === MARK_ONCE) return 'once';
+            if (t === MARK_ONCE || t === MARK_ONCE_SUB) return 'once';
             if (t === MARK_HOLD) return 'hold';
         }
         for (let i = 0; i < n; i++) {
@@ -69,7 +78,25 @@
         return 'on';
     }
 
-    /** 항목 내용을 원하는 상태로 바꾼 새 content 반환. 변화 없으면 null */
+    /** once 항목이 복구될 때 돌아갈 상태: 'sub' | 'on' */
+    function onceRestoreTarget(entry) {
+        const lines = String(entry?.content ?? '').trimStart().split('\n');
+        const n = decoratorBlockLength(lines);
+        for (let i = 0; i < n; i++) {
+            if (lines[i].trim() === MARK_ONCE_SUB) return 'sub';
+        }
+        return 'on';
+    }
+
+    /** 끄기 버튼이 적용할 상태. 보조OFF 항목에 once를 걸면 복구 시 보조OFF로 돌아가도록 oncesub */
+    function offStateFor(entry, mode) {
+        const cur = getEntryState(entry);
+        if (mode === 'once' && cur === 'sub') return 'oncesub';
+        return mode;
+    }
+
+    /** 항목 내용을 원하는 상태로 바꾼 새 content 반환. 변화 없으면 null
+     *  state: 'on' | 'hold' | 'once' | 'oncesub' | 'sub' */
     function withEntryState(content, state) {
         // 엔진이 내용을 trim한 뒤 파싱하므로, 앞쪽 빈 줄은 걷어내고 데코레이터 블록을 찾는다
         const lines = String(content ?? '').split('\n');
@@ -79,6 +106,7 @@
         const tail = lines.slice(n);
         if (state === 'hold') head.push(MARK_HOLD);
         if (state === 'once') head.push(MARK_ONCE);
+        if (state === 'oncesub') head.push(MARK_ONCE_SUB);
         if (state === 'sub') head.push(MARK_SUB);
         const next = head.concat(tail).join('\n');
         return next === content ? null : next;
@@ -372,7 +400,9 @@
                     onceConsumedByAux = false;
                     return false;
                 }
-                const n = await applyStates((entry) => (getEntryState(entry) === 'once' ? 'on' : undefined));
+                const n = await applyStates((entry) =>
+                    getEntryState(entry) === 'once' ? onceRestoreTarget(entry) : undefined
+                );
                 pushLog({ time: Date.now(), type: 'restore', reason, restored: n });
                 // restoreOwedAt은 여기서 지우지 않는다: 트리거가 옛 캐릭터를 되써 마커가 되살아나면
                 // 타이머 재확인이 같은 빚으로 다시 복구해야 한다. 사용자가 새로 끄면 lastUserToggleAt이 더 최신이 되어 멈춘다.
@@ -528,7 +558,7 @@
     await Risuai.addRisuScriptHandler('input', inputHandler);
     await Risuai.addRisuScriptHandler('process', processHandler);
     await Risuai.addRisuScriptHandler('output', outputHandler);
-    await Risuai.addRisuReplacer('beforeRequest', beforeRequestHandler);
+    beforeRequestImpl = beforeRequestHandler;
 
     // ---------------------------------------------------------------
     // UI
@@ -688,6 +718,7 @@
         if (entry.alwaysActive) parts.push('상시');
         else if (entry.key) parts.push('키: ' + entry.key);
         if (entry.selective && entry.secondkey) parts.push('보조: ' + entry.secondkey);
+        if (getEntryState(entry) === 'once' && onceRestoreTarget(entry) === 'sub') parts.push('복구되면 보조 OFF');
         return parts.join(' · ');
     }
 
@@ -762,6 +793,12 @@
                 </div>`;
             })
             .join('');
+    }
+
+    /** 끄기 일괄 적용 대상인지: ON 항목, 그리고 once 모드일 때는 보조OFF 항목도 (복구 시 보조OFF로 복귀) */
+    function canApplyOff(entry) {
+        const cur = getEntryState(entry);
+        return cur === 'on' || (cur === 'sub' && offMode === 'once');
     }
 
     function badgeLabel(state) {
@@ -853,8 +890,8 @@
                             <div class="title">${esc(entryTitle(entry))}</div>
                             <div class="meta">${esc(entryMeta(entry, folderNames))}</div>
                         </div>
-                        <button class="toggle ${state === 'on' ? 'danger' : 'good'}" data-act="toggle">
-                            ${state === 'on' ? '끄기' : '켜기'}
+                        <button class="toggle ${state === 'on' || (state === 'sub' && offMode === 'once') ? 'danger' : 'good'}" data-act="toggle">
+                            ${state === 'on' ? '끄기' : state === 'sub' && offMode === 'once' ? '1턴 끄기' : '켜기'}
                         </button>
                     </div>`;
                           })
@@ -983,7 +1020,7 @@
         document.querySelector('[data-act="all-off"]').onclick = () =>
             act('모두 끄기', () =>
                 applyStates((entry, sid) =>
-                    visible(sid) && matchesFilter(entry) && getEntryState(entry) === 'on' ? offMode : undefined
+                    visible(sid) && matchesFilter(entry) && canApplyOff(entry) ? offStateFor(entry, offMode) : undefined
                 )
             );
         document.querySelector('[data-act="all-on"]').onclick = () =>
@@ -997,8 +1034,8 @@
             document.querySelector(`[data-cat-off="${cat.id}"]`).onclick = () =>
                 act(`${cat.label} 끄기`, () =>
                     applyStates((entry, sid) =>
-                        visible(sid) && cat.test(sid) && matchesFilter(entry) && getEntryState(entry) === 'on'
-                            ? offMode
+                        visible(sid) && cat.test(sid) && matchesFilter(entry) && canApplyOff(entry)
+                            ? offStateFor(entry, offMode)
                             : undefined
                     )
                 );
@@ -1022,7 +1059,7 @@
             groupEl.querySelector('[data-act="group-off"]').onclick = () =>
                 act('그룹 끄기', () =>
                     applyStates((entry, sid) =>
-                        sid === sourceId && matchesFilter(entry) && getEntryState(entry) === 'on' ? offMode : undefined
+                        sid === sourceId && matchesFilter(entry) && canApplyOff(entry) ? offStateFor(entry, offMode) : undefined
                     )
                 );
             groupEl.querySelector('[data-act="group-on"]').onclick = () =>
@@ -1040,7 +1077,10 @@
                 act('변경', () =>
                     applyStates((entry, sid, i) => {
                         if (sid !== sourceId || i !== index) return undefined;
-                        return getEntryState(entry) === 'on' ? offMode : 'on';
+                        const cur = getEntryState(entry);
+                        if (cur === 'on') return offMode;
+                        if (cur === 'sub' && offMode === 'once') return 'oncesub';
+                        return 'on';
                     })
                 );
         });
@@ -1115,7 +1155,7 @@
             await Risuai.removeRisuScriptHandler('input', inputHandler);
             await Risuai.removeRisuScriptHandler('process', processHandler);
             await Risuai.removeRisuScriptHandler('output', outputHandler);
-            await Risuai.removeRisuReplacer('beforeRequest', beforeRequestHandler);
+            await Risuai.removeRisuReplacer('beforeRequest', beforeRequestEntry);
             if (button && button.id) await Risuai.unregisterUIPart(button.id);
         } catch (e) {
             /* ignore */
