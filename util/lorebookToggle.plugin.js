@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 1.5.1
+//@version 1.5.2
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -406,9 +406,7 @@
     // 삽화 생성은 몇 분씩 걸릴 수 있고, 그 도중에 캐릭터 객체를 바꾸면 스크립트가 쓴 채팅 변수가 사라져
     // 이미지 생성이 깨진다. 그 경우 복구는 사용자가 다음 메시지를 보낼 때(입력 직전)만 한다.
     let lastAuxAt = 0;
-    // 첫 재확인은 5초 뒤: '생각의 사슬'처럼 응답 직후 자동으로 다음 전송을 이어 보내는 모듈이 있으면
-    // 그 사이에 파이프라인이 다시 열리고(armed), 타이머는 건너뛰어 그 턴이 끝난 뒤로 미뤄진다.
-    const RECHECK_DELAYS = [5000, 10000, 20000, 45000, 90000];
+    const RECHECK_DELAYS = [3000, 8000, 20000, 45000, 90000];
     let recheckTimers = [];
     let rechecksScheduledAt = 0;
 
@@ -452,12 +450,11 @@
         }
         return content;
     };
-    // 응답을 받아도 바로 복구하지 않는다. 모듈이 곧바로 다음 전송을 이어 보내는 경우(생각의 사슬 등)
-    // 그것도 같은 턴이므로, 몇 초 안에 새 파이프라인이 열리면 타이머가 건너뛰고 그 턴의 끝까지 미룬다.
     const outputHandler = async (content) => {
         mainChatArmed = false;
         processRestoredThisTurn = false;
         restoreOwedAt = Date.now();
+        await restoreOnce('응답 수신 뒤');
         scheduleRechecks();
         return content;
     };
