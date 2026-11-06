@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 2.0.1
+//@version 2.0.2
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -32,9 +32,13 @@
     // 요청 훅은 가장 먼저 등록한다. 같은 훅을 쓰는 다른 플러그인(로어 모니터 등)보다 앞서 돌아야
     // 그쪽이 "걷어낸 뒤" 메시지를 보게 된다. 실제 처리 함수는 아래에서 나중에 연결한다.
     let beforeRequestImpl = null;
+    let afterRequestImpl = null;
+    const afterRequestEntry = async (content, type) =>
+        afterRequestImpl ? afterRequestImpl(content, type) : content;
     const beforeRequestEntry = async (messages, type) =>
         beforeRequestImpl ? beforeRequestImpl(messages, type) : messages;
     await Risuai.addRisuReplacer('beforeRequest', beforeRequestEntry);
+    await Risuai.addRisuReplacer('afterRequest', afterRequestEntry);
 
     const MARK_BASE = '@@dont_activate lbtoggle';
     const MARK_HOLD = MARK_BASE;
@@ -287,18 +291,24 @@
             const lineRes = plan.lines.map(
                 (l) => new RegExp(escapeRegex(l).replace(/ /g, '\\s+'), 'g')
             );
+            // 한 메시지 안에 이 항목의 리터럴 줄이 "충분히" 들어있을 때만 지운다.
+            // 한두 줄이 우연히 겹치는 메시지(모듈 지시문 등)를 깎아 먹지 않기 위한 보호.
+            const needed = plan.lines.length === 1 ? 1 : Math.max(2, Math.ceil(plan.lines.length * 0.3));
+            const singleLineOk = plan.lines.length !== 1 || plan.lines[0].length >= 30;
+            if (!singleLineOk) continue;
             out = out.map((msg) => {
                 if (typeof msg?.content !== 'string' || msg.content.length === 0) return msg;
-                let hits = 0;
+                let matchedLines = 0;
+                for (const re of lineRes) {
+                    re.lastIndex = 0;
+                    if (re.test(msg.content)) matchedLines++;
+                }
+                if (matchedLines < needed) return msg;
                 let content = msg.content;
                 for (const re of lineRes) {
                     re.lastIndex = 0;
-                    content = content.replace(re, () => {
-                        hits++;
-                        return '';
-                    });
+                    content = content.replace(re, '');
                 }
-                if (hits === 0) return msg;
                 plan.result = 'partial';
                 removed++;
                 return { ...msg, content };
@@ -548,6 +558,20 @@
     await Risuai.addRisuScriptHandler('process', processHandler);
     await Risuai.addRisuScriptHandler('output', outputHandler);
     beforeRequestImpl = beforeRequestHandler;
+    // 비스트리밍 응답(루아 axLLM 기본)이면 응답 길이와 앞부분을 해당 요청 기록에 붙인다.
+    // 걷어낸 뒤에도 LLM이 모듈이 기대하는 형식으로 답했는지 볼 수 있다.
+    afterRequestImpl = async (content, type) => {
+        try {
+            const item = requestLog.find((it) => it.type === type && it.responseChars === undefined);
+            if (item && typeof content === 'string') {
+                item.responseChars = content.length;
+                item.responsePreview = content.replace(/\s+/g, ' ').slice(0, 120);
+            }
+        } catch (e) {
+            /* ignore */
+        }
+        return content;
+    };
 
     // ---------------------------------------------------------------
     // UI
@@ -785,7 +809,15 @@
                                   item.charsBefore ? ` · ${item.charsBefore.toLocaleString()}자 → ${item.charsAfter.toLocaleString()}자` : ''
                               }</span>`
                             : ''
-                    }${item.error ? `<span class="miss">오류: ${esc(item.error)}</span>` : ''}</div>
+                    }${item.error ? `<span class="miss">오류: ${esc(item.error)}</span>` : ''}${
+                        item.responseChars !== undefined
+                            ? `<span class="dim">응답 ${item.responseChars.toLocaleString()}자</span>`
+                            : ''
+                    }</div>${
+                        item.responsePreview
+                            ? `<div class="l2">응답 앞부분: ${esc(item.responsePreview)}${item.responseChars > 120 ? '…' : ''}</div>`
+                            : ''
+                    }
                     ${detail ? `<div class="l2">${detail}</div>` : ''}
                 </div>`;
             })
@@ -1170,6 +1202,7 @@
             await Risuai.removeRisuScriptHandler('process', processHandler);
             await Risuai.removeRisuScriptHandler('output', outputHandler);
             await Risuai.removeRisuReplacer('beforeRequest', beforeRequestEntry);
+            await Risuai.removeRisuReplacer('afterRequest', afterRequestEntry);
             if (button && button.id) await Risuai.unregisterUIPart(button.id);
         } catch (e) {
             /* ignore */
