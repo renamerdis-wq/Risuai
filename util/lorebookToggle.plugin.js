@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 2.0.2
+//@version 2.1.0
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -490,6 +490,16 @@
 
     // 최근 요청 기록 (패널에서 확인용)
     const requestLog = [];
+    // 편집 전/후 요청 본문 (디버그). 메모리에만 최근 2개 보관 — 새로고침하면 사라진다.
+    const debugBodies = [];
+    const DEBUG_BODIES_MAX = 2;
+    let debugSeq = 0;
+    function keepDebugBody(before, after) {
+        const id = ++debugSeq;
+        debugBodies.unshift({ id, before: JSON.stringify(before, null, 2), after: JSON.stringify(after, null, 2) });
+        if (debugBodies.length > DEBUG_BODIES_MAX) debugBodies.length = DEBUG_BODIES_MAX;
+        return id;
+    }
     const REQUEST_LOG_MAX = 20;
     function pushLog(item) {
         requestLog.unshift(item);
@@ -508,6 +518,7 @@
             results: [],
             charsBefore: 0,
             charsAfter: 0,
+            debugId: null,
             error: null,
         };
         try {
@@ -535,6 +546,7 @@
                     }
                 }
                 const result = stripSubEntries(messages, subEntries);
+                if (result.removed > 0) log.debugId = keepDebugBody(messages, result.messages);
                 const countChars = (arr) => arr.reduce((a, m) => a + (typeof m?.content === 'string' ? m.content.length : 0), 0);
                 log.charsBefore = countChars(messages);
                 log.charsAfter = countChars(result.messages);
@@ -709,6 +721,9 @@
         .log-item .part { color: #f0c98e; }
         .log-item .miss { color: #f08ea3; }
         .log-item .dim { color: #8a8a99; }
+        .dbg-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
+        .dbg-btn { padding: 3px 8px; font-size: 11.5px; }
+        .dbg-text { width: 100%; height: 220px; margin-top: 6px; background: #0f0f14; color: #d0d0d8; border: 1px solid #2c2c36; border-radius: 8px; padding: 8px; font: 11.5px/1.45 ui-monospace, Consolas, monospace; white-space: pre; resize: vertical; }
         .log-empty { color: #8a8a99; padding: 6px 0 2px; line-height: 1.5; }
         footer {
             padding: 10px 16px; border-top: 1px solid #2c2c36; font-size: 12px; color: #8a8a99;
@@ -785,8 +800,8 @@
                         removedList
                             .map((r) =>
                                 r.result === 'full'
-                                    ? `<span class="ok">✓ ${esc(r.name)}</span>`
-                                    : `<span class="part">△ ${esc(r.name)} (일부)</span>`
+                                    ? `<span class="ok">✂️ ${esc(r.name)}</span>`
+                                    : `<span class="part">✂️△ ${esc(r.name)} (일부)</span>`
                             )
                             .join(' · ')
                     );
@@ -818,7 +833,19 @@
                             ? `<div class="l2">응답 앞부분: ${esc(item.responsePreview)}${item.responseChars > 120 ? '…' : ''}</div>`
                             : ''
                     }
-                    ${detail ? `<div class="l2">${detail}</div>` : ''}
+                    ${detail ? `<div class="l2">${detail}</div>` : ''}${
+                        item.debugId && debugBodies.some((d) => d.id === item.debugId)
+                            ? `<div class="l2 dbg-bar" data-dbg="${item.debugId}">
+                                <span class="dim">요청 본문(JSON):</span>
+                                <button class="dbg-btn" data-dbg-view="before">편집 전 보기</button>
+                                <button class="dbg-btn" data-dbg-view="after">편집 후 보기</button>
+                                <button class="dbg-btn" data-dbg-copy="before">편집 전 복사</button>
+                                <button class="dbg-btn" data-dbg-copy="after">편집 후 복사</button>
+                                <span class="dbg-note dim"></span>
+                            </div>
+                            <textarea class="dbg-text" data-dbg-text="${item.debugId}" readonly spellcheck="false" style="display:none"></textarea>`
+                            : ''
+                    }
                 </div>`;
             })
             .join('');
@@ -1043,6 +1070,43 @@
                 render();
             };
         }
+        document.querySelectorAll('.dbg-bar').forEach((bar) => {
+            const id = Number(bar.getAttribute('data-dbg'));
+            const body = debugBodies.find((d) => d.id === id);
+            const ta = document.querySelector(`.dbg-text[data-dbg-text="${id}"]`);
+            const note = bar.querySelector('.dbg-note');
+            if (!body || !ta) return;
+            bar.querySelectorAll('[data-dbg-view]').forEach((btn) => {
+                btn.onclick = () => {
+                    const which = btn.getAttribute('data-dbg-view');
+                    if (ta.style.display !== 'none' && ta.dataset.which === which) {
+                        ta.style.display = 'none';
+                        return;
+                    }
+                    ta.value = body[which];
+                    ta.dataset.which = which;
+                    ta.style.display = 'block';
+                };
+            });
+            bar.querySelectorAll('[data-dbg-copy]').forEach((btn) => {
+                btn.onclick = async () => {
+                    const text = body[btn.getAttribute('data-dbg-copy')];
+                    try {
+                        await navigator.clipboard.writeText(text);
+                        note.textContent = '복사됨';
+                    } catch (e) {
+                        // 샌드박스에서 클립보드가 막히면 텍스트를 펼쳐서 선택해 둔다
+                        ta.value = text;
+                        ta.style.display = 'block';
+                        ta.focus();
+                        ta.select();
+                        note.textContent = '클립보드 사용 불가: 전체 선택해 뒀으니 복사해 주세요';
+                    }
+                    setTimeout(() => { note.textContent = ''; }, 2500);
+                };
+            });
+        });
+
         const logSize = document.getElementById('lbt-log-size');
         if (logSize) {
             logSize.onclick = (ev) => {
