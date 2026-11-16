@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 2.1.0
+//@version 2.2.0
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -315,17 +315,22 @@
             });
         }
 
-        // 비워진 메시지는 통째로 제거, 빈 줄 정리
-        out = out.filter((msg) => {
-            if (typeof msg?.content !== 'string') return true;
-            const original = messages.find((m) => m === msg);
-            if (original) return true; // 손대지 않은 메시지
-            return msg.content.trim().length > 0 || !!msg.multimodals;
-        }).map((msg) => {
-            const original = messages.find((m) => m === msg);
-            if (original || typeof msg?.content !== 'string') return msg;
-            return { ...msg, content: msg.content.replace(/\n{3,}/g, '\n\n').trim() };
+        // 비워진 메시지는 통째로 제거, 빈 줄 정리. 원래 몇 번째 메시지였는지(origIndex)도 같이 남긴다.
+        const origIndexes = [];
+        const kept = [];
+        out.forEach((msg, i) => {
+            const original = messages[i] === msg; // 손대지 않은 메시지
+            if (typeof msg?.content !== 'string' || original) {
+                kept.push(msg);
+                origIndexes.push(i);
+                return;
+            }
+            if (msg.content.trim().length > 0 || !!msg.multimodals) {
+                kept.push({ ...msg, content: msg.content.replace(/\n{3,}/g, '\n\n').trim() });
+                origIndexes.push(i);
+            }
         });
+        out = kept;
 
         // 'none'을 둘로 나눈다:
         //   absent       — 비교할 리터럴은 있었는데 요청 메시지 어디에도 없음 (엔진이 애초에 안 넣은 항목. 정상)
@@ -338,6 +343,7 @@
         const removedEntries = results.filter((r) => r.result === 'full' || r.result === 'partial').length;
         return {
             messages: out,
+            origIndexes,
             removed: removedEntries,
             hits: removed,
             results,
@@ -494,11 +500,70 @@
     const debugBodies = [];
     const DEBUG_BODIES_MAX = 2;
     let debugSeq = 0;
-    function keepDebugBody(before, after) {
+    function keepDebugBody(before, after, origIndexes) {
         const id = ++debugSeq;
-        debugBodies.unshift({ id, before: JSON.stringify(before, null, 2), after: JSON.stringify(after, null, 2) });
+        const snap = (arr) => arr.map((m) => ({ role: m?.role, content: typeof m?.content === 'string' ? m.content : '' }));
+        debugBodies.unshift({ id, before: snap(before), after: snap(after), origIndexes });
         if (debugBodies.length > DEBUG_BODIES_MAX) debugBodies.length = DEBUG_BODIES_MAX;
         return id;
+    }
+
+    /**
+     * 편집 전 문자열에서 편집 후 문자열로 가며 지워진 구간을 표시한다.
+     * 걷어내기는 삭제만 하므로 '후'는 '전'의 부분수열이다. 왼쪽부터 탐욕적으로 맞춰 가며
+     * 못 맞춘 글자는 '삭제됨'으로 표시한다.
+     * 반환: [{ text, removed }] 조각 배열
+     */
+    function diffRemoved(before, after) {
+        const parts = [];
+        let j = 0;
+        let buf = '';
+        let bufRemoved = null;
+        const push = (ch, removed) => {
+            if (bufRemoved !== removed && buf) {
+                parts.push({ text: buf, removed: bufRemoved });
+                buf = '';
+            }
+            bufRemoved = removed;
+            buf += ch;
+        };
+        for (let i = 0; i < before.length; i++) {
+            const ch = before[i];
+            if (j < after.length && after[j] === ch) {
+                push(ch, false);
+                j++;
+            } else {
+                push(ch, true);
+            }
+        }
+        if (buf) parts.push({ text: buf, removed: bufRemoved });
+        return parts;
+    }
+
+    /** 디버그 보기 HTML: mode = 'before' | 'removed' | 'after' */
+    function renderDebugView(body, mode) {
+        const afterByOrig = new Map();
+        body.origIndexes.forEach((orig, j) => afterByOrig.set(orig, body.after[j]));
+        const blocks = [];
+        if (mode === 'after') {
+            body.after.forEach((m, j) => {
+                blocks.push(`<div class="dbg-msg"><div class="dbg-role">#${body.origIndexes[j] + 1} ${esc(m.role)}</div><div class="dbg-body">${esc(m.content)}</div></div>`);
+            });
+            return blocks.join('') || '<div class="dim">비어 있음</div>';
+        }
+        body.before.forEach((m, i) => {
+            const after = afterByOrig.get(i);
+            const parts = after ? diffRemoved(m.content, after.content) : [{ text: m.content, removed: true }];
+            const hasRemoved = parts.some((p) => p.removed && p.text.trim().length > 0);
+            if (mode === 'removed' && !hasRemoved) return;
+            const inner = parts
+                .filter((p) => mode !== 'removed' || p.removed)
+                .map((p) => (p.removed ? `<span class="del">${esc(p.text)}</span>` : esc(p.text)))
+                .join(mode === 'removed' ? '<span class="dim"> ⋯ </span>' : '');
+            const label = !after ? ' · 메시지 통째로 삭제' : hasRemoved ? ' · 일부 삭제' : '';
+            blocks.push(`<div class="dbg-msg"><div class="dbg-role">#${i + 1} ${esc(m.role)}${label}</div><div class="dbg-body">${inner}</div></div>`);
+        });
+        return blocks.join('') || '<div class="dim">삭제된 부분이 없어요</div>';
     }
     const REQUEST_LOG_MAX = 20;
     function pushLog(item) {
@@ -546,7 +611,7 @@
                     }
                 }
                 const result = stripSubEntries(messages, subEntries);
-                if (result.removed > 0) log.debugId = keepDebugBody(messages, result.messages);
+                if (result.removed > 0) log.debugId = keepDebugBody(messages, result.messages, result.origIndexes);
                 const countChars = (arr) => arr.reduce((a, m) => a + (typeof m?.content === 'string' ? m.content.length : 0), 0);
                 log.charsBefore = countChars(messages);
                 log.charsAfter = countChars(result.messages);
@@ -724,6 +789,12 @@
         .dbg-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
         .dbg-btn { padding: 3px 8px; font-size: 11.5px; }
         .dbg-text { width: 100%; height: 220px; margin-top: 6px; background: #0f0f14; color: #d0d0d8; border: 1px solid #2c2c36; border-radius: 8px; padding: 8px; font: 11.5px/1.45 ui-monospace, Consolas, monospace; white-space: pre; resize: vertical; }
+        .dbg-view { margin-top: 6px; max-height: 60vh; overflow: auto; background: #0f0f14; border: 1px solid #2c2c36; border-radius: 8px; padding: 8px; font-size: 12px; line-height: 1.5; }
+        .dbg-msg { border-top: 1px solid #1f1f27; padding: 6px 0; }
+        .dbg-msg:first-child { border-top: 0; }
+        .dbg-role { color: #8ec0f0; font-weight: 600; font-size: 11.5px; margin-bottom: 3px; }
+        .dbg-body { white-space: pre-wrap; word-break: break-word; color: #d0d0d8; }
+        .dbg-body .del { background: rgba(240, 142, 163, .18); color: #f08ea3; text-decoration: line-through; text-decoration-color: rgba(240,142,163,.6); border-radius: 2px; }
         .log-empty { color: #8a8a99; padding: 6px 0 2px; line-height: 1.5; }
         footer {
             padding: 10px 16px; border-top: 1px solid #2c2c36; font-size: 12px; color: #8a8a99;
@@ -836,13 +907,15 @@
                     ${detail ? `<div class="l2">${detail}</div>` : ''}${
                         item.debugId && debugBodies.some((d) => d.id === item.debugId)
                             ? `<div class="l2 dbg-bar" data-dbg="${item.debugId}">
-                                <span class="dim">요청 본문(JSON):</span>
-                                <button class="dbg-btn" data-dbg-view="before">편집 전 보기</button>
-                                <button class="dbg-btn" data-dbg-view="after">편집 후 보기</button>
-                                <button class="dbg-btn" data-dbg-copy="before">편집 전 복사</button>
-                                <button class="dbg-btn" data-dbg-copy="after">편집 후 복사</button>
+                                <span class="dim">요청 본문:</span>
+                                <button class="dbg-btn" data-dbg-view="before">편집 전 (삭제 표시)</button>
+                                <button class="dbg-btn" data-dbg-view="removed">삭제된 부분만</button>
+                                <button class="dbg-btn" data-dbg-view="after">편집 후</button>
+                                <button class="dbg-btn" data-dbg-copy="before">JSON 복사 (전)</button>
+                                <button class="dbg-btn" data-dbg-copy="after">JSON 복사 (후)</button>
                                 <span class="dbg-note dim"></span>
                             </div>
+                            <div class="dbg-view" data-dbg-view-box="${item.debugId}" style="display:none"></div>
                             <textarea class="dbg-text" data-dbg-text="${item.debugId}" readonly spellcheck="false" style="display:none"></textarea>`
                             : ''
                     }
@@ -1074,23 +1147,25 @@
             const id = Number(bar.getAttribute('data-dbg'));
             const body = debugBodies.find((d) => d.id === id);
             const ta = document.querySelector(`.dbg-text[data-dbg-text="${id}"]`);
+            const box = document.querySelector(`.dbg-view[data-dbg-view-box="${id}"]`);
             const note = bar.querySelector('.dbg-note');
-            if (!body || !ta) return;
+            if (!body || !ta || !box) return;
             bar.querySelectorAll('[data-dbg-view]').forEach((btn) => {
                 btn.onclick = () => {
                     const which = btn.getAttribute('data-dbg-view');
-                    if (ta.style.display !== 'none' && ta.dataset.which === which) {
-                        ta.style.display = 'none';
+                    ta.style.display = 'none';
+                    if (box.style.display !== 'none' && box.dataset.which === which) {
+                        box.style.display = 'none';
                         return;
                     }
-                    ta.value = body[which];
-                    ta.dataset.which = which;
-                    ta.style.display = 'block';
+                    box.innerHTML = renderDebugView(body, which);
+                    box.dataset.which = which;
+                    box.style.display = 'block';
                 };
             });
             bar.querySelectorAll('[data-dbg-copy]').forEach((btn) => {
                 btn.onclick = async () => {
-                    const text = body[btn.getAttribute('data-dbg-copy')];
+                    const text = JSON.stringify(body[btn.getAttribute('data-dbg-copy')], null, 2);
                     try {
                         await navigator.clipboard.writeText(text);
                         note.textContent = '복사됨';
