@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 2.3.3
+//@version 2.4.0
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -49,6 +49,7 @@
     // 엔진이 모르는 데코레이터라 프롬프트에서는 그냥 제거된다.
     const MARK_SUB = '@@lbtoggle sub_off';
     const BUTTON_ID = 'lbtoggle-open';
+    const CACHE_BUST_PREFIX = 'lbtoggle-cache-';
 
     // ---------------------------------------------------------------
     // 마커 처리
@@ -164,13 +165,21 @@
                     label: `모듈 · ${mod.name}${enabled ? '' : ' (비활성 모듈)'}`,
                     entries: mod.lorebook,
                     write: async (entries) => {
-                        const freshDb = await Risuai.getDatabase(['modules']);
+                        const freshDb = await Risuai.getDatabase(['modules', 'enabledModules']);
                         if (!freshDb || !Array.isArray(freshDb.modules)) return;
                         const target =
                             freshDb.modules.find((m) => m && m.id === mod.id) ?? freshDb.modules[modIndex];
                         if (!target) return;
                         target.lorebook = entries;
-                        await Risuai.setDatabaseLite({ modules: freshDb.modules });
+                        // 리수는 "켜진 모듈 id 목록"을 키로 모듈 객체를 캐시한다(getModules). 여기서 db.modules를
+                        // 새 객체로 바꿔도 캐시는 옛 객체를 보므로, 엔진은 바뀐 마커를 앱 재시작 전까지 못 본다.
+                        // 존재하지 않는 더미 id 하나를 바꿔 끼워 키를 달리하면 다음 요청 때 새로 읽는다.
+                        // (없는 id는 어떤 모듈에도 매칭되지 않아 동작엔 영향 없음. 늘 하나만 남는다.)
+                        const enabled = (freshDb.enabledModules ?? []).filter(
+                            (id) => !String(id).startsWith(CACHE_BUST_PREFIX)
+                        );
+                        enabled.push(CACHE_BUST_PREFIX + Date.now().toString(36));
+                        await Risuai.setDatabaseLite({ modules: freshDb.modules, enabledModules: enabled });
                     },
                 });
             });
