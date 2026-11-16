@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 2.3.0
+//@version 2.3.2
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -514,11 +514,27 @@
     //   - 보조 호출(삽화 등): 그 요청이 once 마커를 본 시점
     // 사용자가 패널에서 뭔가 끈 시각이 이보다 뒤면, 그 토글은 아직 소비되지 않은 것이므로 복구하지 않는다.
     let restoreOwedAt = 0;
+    let lastMainRequestAt = 0; // 메인 요청이 실제로 나간 시각
     let lastUserToggleAt = 0;
     let onceConsumedByAux = false;
+    // 요청이 나갈 때 once 상태였던 항목들. 복구는 이 항목들만 한다.
+    // 응답을 기다리는 동안 새로 끈 항목은 여기 없으니 다음 턴 몫으로 남는다.
+    let consumedOnceKeys = null;
+
+    function entryKeyOf(entry) {
+        if (entry?.id) return 'id:' + entry.id;
+        return 'ck:' + String(entry?.comment ?? '') + '|' + String(entry?.key ?? '') + '|' + entryBody(entry).slice(0, 80);
+    }
+
+    function rememberConsumedOnce(entries) {
+        consumedOnceKeys = new Set();
+        for (const e of entries ?? []) {
+            if (isToggleable(e) && getEntryState(e) === 'once') consumedOnceKeys.add(entryKeyOf(e));
+        }
+    }
 
     function restoreIsDue() {
-        return restoreOwedAt > 0 && restoreOwedAt >= lastUserToggleAt;
+        return restoreOwedAt > 0;
     }
 
     async function restoreOnce(reason) {
@@ -531,10 +547,14 @@
                     onceConsumedByAux = false;
                     return false;
                 }
-                const n = await applyStates((entry) => (getEntryState(entry) === 'once' ? { main: 'on' } : undefined));
-                pushLog({ time: Date.now(), type: 'restore', reason, restored: n });
-                // restoreOwedAt은 여기서 지우지 않는다: 트리거가 옛 캐릭터를 되써 마커가 되살아나면
-                // 타이머 재확인이 같은 빚으로 다시 복구해야 한다. 사용자가 새로 끄면 lastUserToggleAt이 더 최신이 되어 멈춘다.
+                const n = await applyStates((entry) => {
+                    if (getEntryState(entry) !== 'once') return undefined;
+                    if (consumedOnceKeys && !consumedOnceKeys.has(entryKeyOf(entry))) return undefined; // 요청 뒤에 끈 항목
+                    return { main: 'on' };
+                });
+                if (n > 0) pushLog({ time: Date.now(), type: 'restore', reason, restored: n });
+                // restoreOwedAt·consumedOnceKeys는 여기서 지우지 않는다: 트리거가 옛 캐릭터를 되써 마커가 되살아나면
+                // 타이머 재확인이 같은 목록으로 다시 복구해야 한다. 다음 요청이 나가면 목록이 새로 잡힌다.
                 if (n > 0) onceConsumedByAux = false;
                 return n > 0;
             } catch (e) {
@@ -581,6 +601,7 @@
             setTimeout(async () => {
                 if (mainChatArmed) return;
                 if (lastAuxAt >= rechecksScheduledAt) return; // 그 사이 보조 호출이 있었음 → 건드리지 않음
+                if (lastUserToggleAt >= rechecksScheduledAt) return; // 응답 뒤 사용자가 새로 토글함 → 다음 턴 몫
                 await restoreOnce('턴 종료 후 재확인');
             }, d)
         );
@@ -724,10 +745,12 @@
             const armed = mainChatArmed && Date.now() - mainChatArmedAt < MAIN_ARM_TTL;
             log.isMain = type === 'model' && armed;
             if (log.isMain) {
+                lastMainRequestAt = Date.now();
                 // 메인 요청은 엔진이 이미 뺀 뒤라 편집할 게 없다. 대신 그 시점에 꺼져 있던 항목 수를 남겨
                 // "진짜 빠졌는지"를 기록만으로 알 수 있게 한다.
                 try {
                     const entries = (await Risuai.getCurrentLorebookEntries()) ?? [];
+                    rememberConsumedOnce(entries);
                     log.totalEntries = entries.filter(isToggleable).length;
                     const anyOff = entries.some((e) => isToggleable(e) && getEntryState(e) !== 'on');
                     let predicted = null;
@@ -773,6 +796,11 @@
                     if (once) {
                         onceConsumedByAux = true;
                         restoreOwedAt = Date.now();
+                        try {
+                            rememberConsumedOnce((await Risuai.getCurrentLorebookEntries()) ?? []);
+                        } catch (e) {
+                            consumedOnceKeys = null;
+                        }
                     }
                 }
             }
