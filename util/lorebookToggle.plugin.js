@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 2.2.0
+//@version 2.2.1
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -584,11 +584,28 @@
             charsBefore: 0,
             charsAfter: 0,
             debugId: null,
+            onceCount: 0,
+            holdCount: 0,
             error: null,
         };
         try {
             const armed = mainChatArmed && Date.now() - mainChatArmedAt < MAIN_ARM_TTL;
             log.isMain = type === 'model' && armed;
+            if (log.isMain) {
+                // 메인 요청은 엔진이 이미 뺀 뒤라 편집할 게 없다. 대신 그 시점에 꺼져 있던 항목 수를 남겨
+                // "진짜 빠졌는지"를 기록만으로 알 수 있게 한다.
+                try {
+                    const entries = await Risuai.getCurrentLorebookEntries();
+                    for (const e of entries ?? []) {
+                        if (!isToggleable(e)) continue;
+                        const st = getEntryState(e);
+                        if (st === 'once') log.onceCount++;
+                        else if (st === 'hold') log.holdCount++;
+                    }
+                } catch (e) {
+                    /* ignore */
+                }
+            }
             if (!log.isMain) {
                 lastAuxAt = Date.now();
                 cancelRechecks(); // 보조 호출 중엔 타이머 복구 금지
@@ -781,6 +798,7 @@
         .tag.main { background: #1f4d33; color: #8fe2b0; }
         .tag.aux { background: #1f2f4d; color: #8ec0f0; }
         .tag.skip { background: #2a2a33; color: #9a9aa8; }
+        .tag.part { background: #4d3b1f; color: #f0c98e; }
         .log-item .l2 { color: #8a8a99; margin-top: 2px; }
         .log-item .ok { color: #8fe2b0; }
         .log-item .part { color: #f0c98e; }
@@ -858,7 +876,9 @@
                     return `<div class="log-item"><div class="l1"><span>${hh}:${mm}:${ss}</span><span class="tag main">이번 턴만 → 켜짐</span><span>${esc(item.reason)}</span><span>${item.restored}개</span></div></div>`;
                 }
                 const tag = item.isMain
-                    ? '<span class="tag main">메인 채팅 · 손대지 않음</span>'
+                    ? `<span class="tag main">메인 채팅 · 손대지 않음</span>${
+                          item.onceCount ? `<span class="tag part">1턴 OFF ${item.onceCount}개 빠진 채 전송</span>` : ''
+                      }${item.holdCount ? `<span class="tag skip">고정 OFF ${item.holdCount}개</span>` : ''}`
                     : item.results.length === 0
                       ? '<span class="tag skip">보조 · 보조OFF 항목 없음</span>'
                       : '<span class="tag aux">보조 · 제외 적용</span>';
