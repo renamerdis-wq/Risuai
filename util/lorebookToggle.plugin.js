@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 2.3.2
+//@version 2.3.3
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -517,8 +517,7 @@
     let lastMainRequestAt = 0; // 메인 요청이 실제로 나간 시각
     let lastUserToggleAt = 0;
     let onceConsumedByAux = false;
-    // 요청이 나갈 때 once 상태였던 항목들. 복구는 이 항목들만 한다.
-    // 응답을 기다리는 동안 새로 끈 항목은 여기 없으니 다음 턴 몫으로 남는다.
+    // 요청이 나갈 때 once 상태였던 항목들 (기록용). 복구는 복구 시점의 once 전부를 켠다.
     let consumedOnceKeys = null;
 
     function entryKeyOf(entry) {
@@ -547,11 +546,8 @@
                     onceConsumedByAux = false;
                     return false;
                 }
-                const n = await applyStates((entry) => {
-                    if (getEntryState(entry) !== 'once') return undefined;
-                    if (consumedOnceKeys && !consumedOnceKeys.has(entryKeyOf(entry))) return undefined; // 요청 뒤에 끈 항목
-                    return { main: 'on' };
-                });
+                // 복구 시점에 once인 항목은 전부 켠다 (응답 기다리는 동안 끈 것도 포함). 사용자 선호.
+                const n = await applyStates((entry) => (getEntryState(entry) === 'once' ? { main: 'on' } : undefined));
                 if (n > 0) pushLog({ time: Date.now(), type: 'restore', reason, restored: n });
                 // restoreOwedAt·consumedOnceKeys는 여기서 지우지 않는다: 트리거가 옛 캐릭터를 되써 마커가 되살아나면
                 // 타이머 재확인이 같은 목록으로 다시 복구해야 한다. 다음 요청이 나가면 목록이 새로 잡힌다.
