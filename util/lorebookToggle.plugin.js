@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 2.2.1
+//@version 2.2.2
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -586,6 +586,8 @@
             debugId: null,
             onceCount: 0,
             holdCount: 0,
+            onceNames: [],
+            holdNames: [],
             error: null,
         };
         try {
@@ -599,8 +601,13 @@
                     for (const e of entries ?? []) {
                         if (!isToggleable(e)) continue;
                         const st = getEntryState(e);
-                        if (st === 'once') log.onceCount++;
-                        else if (st === 'hold') log.holdCount++;
+                        if (st === 'once') {
+                            log.onceCount++;
+                            log.onceNames.push(entryTitle(e));
+                        } else if (st === 'hold') {
+                            log.holdCount++;
+                            log.holdNames.push(entryTitle(e));
+                        }
                     }
                 } catch (e) {
                     /* ignore */
@@ -799,6 +806,9 @@
         .tag.aux { background: #1f2f4d; color: #8ec0f0; }
         .tag.skip { background: #2a2a33; color: #9a9aa8; }
         .tag.part { background: #4d3b1f; color: #f0c98e; }
+        .offlist { margin-top: 4px; }
+        .offlist summary { cursor: pointer; user-select: none; font-size: 12px; }
+        .offlist-body { margin: 4px 0 0 12px; color: #c8c8d2; line-height: 1.6; }
         .log-item .l2 { color: #8a8a99; margin-top: 2px; }
         .log-item .ok { color: #8fe2b0; }
         .log-item .part { color: #f0c98e; }
@@ -906,6 +916,14 @@
                     detailParts.push(
                         `<span class="dim">－ 요청에 없던 항목 ${absent.length}개 (키워드 미매칭 등, 정상)</span>`
                     );
+                }
+                if (item.isMain && (item.onceNames?.length || item.holdNames?.length)) {
+                    const list = (label, cls, names) =>
+                        `<details class="offlist"><summary class="${cls}">${label} ${names.length}개 — 어떤 항목이 빠졌는지 보기</summary><div class="offlist-body">${names
+                            .map((n) => esc(n))
+                            .join(' · ')}</div></details>`;
+                    if (item.onceNames?.length) detailParts.push(list('1턴 OFF', 'part', item.onceNames));
+                    if (item.holdNames?.length) detailParts.push(list('고정 OFF', 'miss', item.holdNames));
                 }
                 const detail = detailParts.join('<br>');
                 return `<div class="log-item">
