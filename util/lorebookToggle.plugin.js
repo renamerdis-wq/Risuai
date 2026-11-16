@@ -1,7 +1,7 @@
 //@name lorebook_toggle
 //@display-name Lorebook Toggle
 //@api 3.0
-//@version 2.2.2
+//@version 2.3.0
 //@arg keep_blue int {{name::진입 버튼 파란색 그대로 두기}} {{checkbox::리수 기본 파란 버튼 유지}} 끄면(기본) 채팅 화면의 📕 버튼을 차분한 반투명 회색으로 바꿉니다. 이를 위해 시작할 때 메인 화면 접근 권한을 한 번 묻습니다.
 //@link https://github.com/kwaroran/RisuAI RisuAI
 
@@ -119,6 +119,7 @@
         const chatIndex = await Risuai.getCurrentChatIndex();
         const char = await Risuai.getCharacter();
         const chat = await Risuai.getChatFromIndex(charIndex, chatIndex);
+        if (char && typeof char === 'object') lastLoreSettings = char.loreSettings ?? {};
         const db = await Risuai.getDatabase(['modules', 'enabledModules']);
 
         const sources = [];
@@ -211,6 +212,129 @@
         const lines = String(entry?.content ?? '').trimStart().split('\n');
         const n = decoratorBlockLength(lines);
         return lines.slice(n).join('\n').replace(/\r\n/g, '\n').trim();
+    }
+
+    // ---------------------------------------------------------------
+    // 활성화 예측 (엔진 흉내). "꺼두지 않았다면 이 요청에 들어갔을 항목"을 추리는 용도.
+    // 리수 lorebook.svelte.ts 의 searchMatch / 데코레이터 처리를 따라가되, 토큰 예산·확률·인사말 조건은 뺀다.
+    // 재귀 스캔은 최대 3바퀴. 그래서 "추정"이다.
+    // ---------------------------------------------------------------
+    function parseLoreDecorators(entry) {
+        const lines = String(entry?.content ?? '').trimStart().split('\n');
+        const n = decoratorBlockLength(lines);
+        const decos = [];
+        for (let i = 0; i < n; i++) {
+            const t = lines[i].trim();
+            if (isMarkLine(t)) continue; // 우리 마커는 "안 걸었다면"을 보는 거니까 무시
+            const m = t.match(/^@@@?([a-z_]+)\s*(.*)$/i);
+            if (!m) continue;
+            const args = m[2]
+                .split(',')
+                .map((a) => a.trim())
+                .filter(Boolean);
+            decos.push({ name: m[1], args });
+        }
+        return { decos, body: lines.slice(n).join('\n') };
+    }
+
+    function loreSearchMatch(texts, keys, opts) {
+        const cleanKeys = keys.map((k) => k.trim()).filter(Boolean);
+        if (cleanKeys.length === 0) return false;
+        if (opts.regex) {
+            for (const text of texts) {
+                for (const rs of cleanKeys) {
+                    if (!rs.startsWith('/')) return false;
+                    const flag = rs.split('/').pop();
+                    if (!flag) return false;
+                    try {
+                        if (new RegExp(rs.replace('/' + flag, '').slice(1), flag).test(text)) return true;
+                    } catch (e) {
+                        return false;
+                    }
+                }
+            }
+            return false;
+        }
+        const norm = (t) => t.toLocaleLowerCase().replace(/\{\{\/\/(.+?)\}\}/g, '').replace(/\{\{comment:(.+?)\}\}/g, '');
+        let allMatched = true;
+        for (const raw of texts) {
+            const text = norm(raw);
+            if (opts.fullWord) {
+                const words = text.split(' ');
+                for (const k of cleanKeys) {
+                    if (words.includes(k.toLocaleLowerCase())) {
+                        if (!opts.all) return true;
+                    } else if (opts.all) allMatched = false;
+                }
+            } else {
+                const squashed = text.replace(/ /g, '');
+                for (const k of cleanKeys) {
+                    if (squashed.includes(k.toLocaleLowerCase().replace(/ /g, ''))) {
+                        if (!opts.all) return true;
+                    } else if (opts.all) allMatched = false;
+                }
+            }
+        }
+        return !!(opts.all && allMatched);
+    }
+
+    /** entries 중 "활성화됐을" 항목의 인덱스 Set. messages: 채팅 메시지 배열(data 필드) */
+    function predictActiveEntries(entries, messages, settings) {
+        const scanDepthDefault = settings?.scanDepth ?? 5;
+        const fullWordDefault = settings?.fullWordMatching ?? false;
+        const recursive = settings?.recursiveScanning ?? true;
+        const chatLength = (messages?.length ?? 0) + 1;
+        const msgTexts = (messages ?? []).map((m) => String(m?.data ?? ''));
+        const active = new Set();
+        const recursiveTexts = [];
+        for (let round = 0; round < 3; round++) {
+            let added = false;
+            entries.forEach((entry, i) => {
+                if (active.has(i) || !isToggleable(entry)) return;
+                if (!entry.alwaysActive && !entry.key) return;
+                const { decos, body } = parseLoreDecorators(entry);
+                let on = true;
+                let force = 'none';
+                let scanDepth = scanDepthDefault;
+                let fullWord = fullWordDefault;
+                let noRecursiveSearch = false;
+                const queries = [];
+                for (const d of decos) {
+                    switch (d.name) {
+                        case 'activate': force = 'activate'; break;
+                        case 'dont_activate': force = 'deactivate'; break;
+                        case 'activate_only_after': { const n = parseInt(d.args[0]); if (!Number.isNaN(n) && chatLength < n) on = false; break; }
+                        case 'activate_only_every': { const n = parseInt(d.args[0]); if (!Number.isNaN(n) && chatLength % n !== 0) on = false; break; }
+                        case 'scan_depth': { const n = parseInt(d.args[0]); if (!Number.isNaN(n)) scanDepth = n; break; }
+                        case 'match_full_word': fullWord = true; break;
+                        case 'match_partial_word': fullWord = false; break;
+                        case 'additional_keys': queries.push({ keys: d.args, negative: false }); break;
+                        case 'exclude_keys': queries.push({ keys: d.args, negative: true }); break;
+                        case 'exclude_keys_all': queries.push({ keys: d.args, negative: true, all: true }); break;
+                        case 'no_recursive_search': noRecursiveSearch = true; break;
+                        default: break;
+                    }
+                }
+                if (on && force === 'none' && !entry.alwaysActive) {
+                    queries.push({ keys: String(entry.key ?? '').split(','), negative: false });
+                    if (entry.selective && entry.secondkey) queries.push({ keys: String(entry.secondkey).split(','), negative: false });
+                    const texts = msgTexts.slice(Math.max(0, msgTexts.length - scanDepth)).concat(noRecursiveSearch ? [] : recursiveTexts);
+                    for (const q of queries) {
+                        const hit = loreSearchMatch(texts, q.keys, { regex: !!entry.useRegex, fullWord, all: q.all });
+                        if (q.negative ? hit : !hit) { on = false; break; }
+                    }
+                }
+                if (force === 'activate') on = true;
+                else if (force === 'deactivate') on = false;
+                if (on) {
+                    active.add(i);
+                    added = true;
+                    if (recursive) recursiveTexts.push(body);
+                }
+            });
+            if (!added || !recursive) break;
+        }
+        return active;
     }
 
     function escapeRegex(s) {
@@ -496,6 +620,7 @@
 
     // 최근 요청 기록 (패널에서 확인용)
     const requestLog = [];
+    let lastLoreSettings = null; // 캐릭터 로어북 설정(scanDepth 등). 패널을 열 때 갱신된다
     // 편집 전/후 요청 본문 (디버그). 메모리에만 최근 2개 보관 — 새로고침하면 사라진다.
     const debugBodies = [];
     const DEBUG_BODIES_MAX = 2;
@@ -588,6 +713,11 @@
             holdCount: 0,
             onceNames: [],
             holdNames: [],
+            onceSkipped: [],
+            holdSkipped: [],
+            predicted: false,
+            totalEntries: 0,
+            predictedActive: 0,
             error: null,
         };
         try {
@@ -597,18 +727,38 @@
                 // 메인 요청은 엔진이 이미 뺀 뒤라 편집할 게 없다. 대신 그 시점에 꺼져 있던 항목 수를 남겨
                 // "진짜 빠졌는지"를 기록만으로 알 수 있게 한다.
                 try {
-                    const entries = await Risuai.getCurrentLorebookEntries();
-                    for (const e of entries ?? []) {
-                        if (!isToggleable(e)) continue;
-                        const st = getEntryState(e);
-                        if (st === 'once') {
-                            log.onceCount++;
-                            log.onceNames.push(entryTitle(e));
-                        } else if (st === 'hold') {
-                            log.holdCount++;
-                            log.holdNames.push(entryTitle(e));
+                    const entries = (await Risuai.getCurrentLorebookEntries()) ?? [];
+                    log.totalEntries = entries.filter(isToggleable).length;
+                    const anyOff = entries.some((e) => isToggleable(e) && getEntryState(e) !== 'on');
+                    let predicted = null;
+                    if (anyOff) {
+                        // 꺼둔 게 있을 때만 (비용) 채팅을 읽어 "안 껐다면 들어갔을" 항목을 추정한다
+                        try {
+                            const ci = await Risuai.getCurrentCharacterIndex();
+                            const chi = await Risuai.getCurrentChatIndex();
+                            const chat = await Risuai.getChatFromIndex(ci, chi);
+                            const settings = lastLoreSettings ?? {};
+                            predicted = predictActiveEntries(entries, chat?.message ?? [], settings);
+                            log.predicted = true;
+                            log.predictedActive = predicted.size;
+                        } catch (e) {
+                            predicted = null;
                         }
                     }
+                    entries.forEach((e, i) => {
+                        if (!isToggleable(e)) return;
+                        const st = getEntryState(e);
+                        if (st !== 'once' && st !== 'hold') return;
+                        const name = entryTitle(e);
+                        const wouldBeIn = predicted ? predicted.has(i) : true;
+                        if (st === 'once') {
+                            log.onceCount++;
+                            (wouldBeIn ? log.onceNames : log.onceSkipped).push(name);
+                        } else {
+                            log.holdCount++;
+                            (wouldBeIn ? log.holdNames : log.holdSkipped).push(name);
+                        }
+                    });
                 } catch (e) {
                     /* ignore */
                 }
@@ -887,7 +1037,13 @@
                 }
                 const tag = item.isMain
                     ? `<span class="tag main">메인 채팅 · 손대지 않음</span>${
-                          item.onceCount ? `<span class="tag part">1턴 OFF ${item.onceCount}개 빠진 채 전송</span>` : ''
+                          item.onceCount
+                              ? `<span class="tag part">1턴 OFF ${item.onceCount}개${item.predicted ? ` · 원래 들어갔을 ${item.onceNames.length}개 빠짐` : ' 빠진 채 전송'}</span>`
+                              : ''
+                      }${
+                          item.totalEntries
+                              ? `<span class="dim">항목 ${item.totalEntries}개 보임${item.predicted ? ` · 활성 추정 ${item.predictedActive}개` : ''}</span>`
+                              : ''
                       }${item.holdCount ? `<span class="tag skip">고정 OFF ${item.holdCount}개</span>` : ''}`
                     : item.results.length === 0
                       ? '<span class="tag skip">보조 · 보조OFF 항목 없음</span>'
@@ -917,13 +1073,16 @@
                         `<span class="dim">－ 요청에 없던 항목 ${absent.length}개 (키워드 미매칭 등, 정상)</span>`
                     );
                 }
-                if (item.isMain && (item.onceNames?.length || item.holdNames?.length)) {
+                if (item.isMain && (item.onceCount || item.holdCount)) {
                     const list = (label, cls, names) =>
-                        `<details class="offlist"><summary class="${cls}">${label} ${names.length}개 — 어떤 항목이 빠졌는지 보기</summary><div class="offlist-body">${names
+                        `<details class="offlist"><summary class="${cls}">${label} ${names.length}개 — 보기</summary><div class="offlist-body">${names
                             .map((n) => esc(n))
                             .join(' · ')}</div></details>`;
-                    if (item.onceNames?.length) detailParts.push(list('1턴 OFF', 'part', item.onceNames));
-                    if (item.holdNames?.length) detailParts.push(list('고정 OFF', 'miss', item.holdNames));
+                    const pred = item.predicted;
+                    if (item.onceNames?.length) detailParts.push(list(pred ? '1턴 OFF 중 원래 들어갔을 항목(추정)' : '1턴 OFF', 'part', item.onceNames));
+                    if (item.onceSkipped?.length) detailParts.push(list('1턴 OFF 중 어차피 안 들어갈 항목(키워드 미매칭 등)', 'dim', item.onceSkipped));
+                    if (item.holdNames?.length) detailParts.push(list(pred ? '고정 OFF 중 원래 들어갔을 항목(추정)' : '고정 OFF', 'miss', item.holdNames));
+                    if (item.holdSkipped?.length) detailParts.push(list('고정 OFF 중 어차피 안 들어갈 항목', 'dim', item.holdSkipped));
                 }
                 const detail = detailParts.join('<br>');
                 return `<div class="log-item">
