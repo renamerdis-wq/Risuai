@@ -1,0 +1,141 @@
+<body style="margin: 0; padding: 0; background-color: #121218; font-family: 'Pretendard', 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', sans-serif;">
+
+<p style="font-size: 0; margin: 0; padding: 0;">**-- Main Container --**</p>
+<div style="background-color: #121218; padding: 18px 12px 1px 12px;">
+
+<p style="font-size: 0; margin: 0; padding: 0;">**-- Hero --**</p>
+<div style="background-color: #16161c; border: 1px solid #2c2c36; border-radius: 16px; padding: 28px 22px 22px 22px; margin: 0 0 16px 0; box-shadow: 0 10px 30px rgba(0,0,0,0.45);">
+  <div style="font-size: 13px; color: #8a8a99; letter-spacing: 2px; margin: 0 0 10px 0;">RISUAI PLUGIN · API 3.0</div>
+  <div style="font-size: 34px; font-weight: 800; color: #f2f2f6; line-height: 1.2; margin: 0 0 10px 0;">📕 로어북 토글</div>
+  <div style="font-size: 16px; color: #c8c8d2; line-height: 1.6; margin: 0 0 18px 0;">로어북을 <b style="color: #f2f2f6;">지우지도, 키를 건드리지도 않고</b> 껐다 켠다.<br>이번 턴만 빼거나, 삽화·요약 같은 <b style="color: #8ec0f0;">보조모델 요청에서만</b> 빼는 것도 된다.</div>
+  <div style="margin: 0;">
+    <span style="display: inline-block; background-color: #1f4d33; color: #8fe2b0; font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px; margin: 0 6px 6px 0;">ON</span>
+    <span style="display: inline-block; background-color: #4d1f2a; color: #f08ea3; font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px; margin: 0 6px 6px 0;">OFF</span>
+    <span style="display: inline-block; background-color: #4d3b1f; color: #f0c98e; font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px; margin: 0 6px 6px 0;">1턴 OFF</span>
+    <span style="display: inline-block; background-color: #1f2f4d; color: #8ec0f0; font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px; margin: 0 6px 6px 0;">보조 제외</span>
+  </div>
+</div>
+
+<p style="font-size: 0; margin: 0; padding: 0;">**-- Why --**</p>
+<div style="background-color: #16161c; border: 1px solid #2c2c36; border-radius: 16px; padding: 22px; margin: 0 0 16px 0;">
+  <div style="font-size: 20px; font-weight: 800; color: #f2f2f6; margin: 0 0 12px 0;">이런 분한테</div>
+  <div style="font-size: 15px; color: #c8c8d2; line-height: 1.75; margin: 0;">
+    <div style="padding: 8px 0 8px 14px; border-left: 3px solid #4b4bd8; margin: 0 0 8px 0;">로어북이 100개 넘는데 특정 장면에서만 몇 개 빼고 싶을 때. 삭제하거나 키 지웠다가 다시 넣는 건 너무 귀찮다.</div>
+    <div style="padding: 8px 0 8px 14px; border-left: 3px solid #4b4bd8; margin: 0 0 8px 0;">삽화 모듈이 보조모델로 이미지 프롬프트를 뽑는데, 세계관 로어북이 통째로 따라 들어가서 토큰만 축낼 때.</div>
+    <div style="padding: 8px 0 8px 14px; border-left: 3px solid #4b4bd8; margin: 0;">"이 턴만 로어북 없이 어떻게 나오나" 테스트해보고 싶을 때.</div>
+  </div>
+</div>
+
+<p style="font-size: 0; margin: 0; padding: 0;">**-- Two axes --**</p>
+<div style="background-color: #16161c; border: 1px solid #2c2c36; border-radius: 16px; padding: 22px; margin: 0 0 16px 0;">
+  <div style="font-size: 20px; font-weight: 800; color: #f2f2f6; margin: 0 0 6px 0;">상태는 두 축으로 따로 논다</div>
+  <div style="font-size: 13px; color: #8a8a99; margin: 0 0 16px 0;">항목마다 메인 상태와 보조 상태가 각각 있고, 서로 건드리지 않는다.</div>
+
+  <div style="background-color: #1b1b22; border-radius: 12px; padding: 16px; margin: 0 0 10px 0;">
+    <div style="font-size: 15px; font-weight: 700; color: #f2f2f6; margin: 0 0 8px 0;">① 메인 축 — 로어북 엔진에 작용</div>
+    <table style="width: 100%; border-collapse: collapse; font-size: 14px; color: #c8c8d2;">
+      <tr><td style="padding: 6px 8px 6px 0; width: 92px; vertical-align: top;"><span style="display: inline-block; background-color: #1f4d33; color: #8fe2b0; font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 999px;">ON</span></td><td style="padding: 6px 0; line-height: 1.6;">평소대로 들어간다.</td></tr>
+      <tr><td style="padding: 6px 8px 6px 0; vertical-align: top;"><span style="display: inline-block; background-color: #4d1f2a; color: #f08ea3; font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 999px;">OFF</span></td><td style="padding: 6px 0; line-height: 1.6;"><b style="color: #f2f2f6;">고정 끄기.</b> 다시 켤 때까지 꺼진다.</td></tr>
+      <tr><td style="padding: 6px 8px 6px 0; vertical-align: top;"><span style="display: inline-block; background-color: #4d3b1f; color: #f0c98e; font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 999px;">1턴 OFF</span></td><td style="padding: 6px 0; line-height: 1.6;"><b style="color: #f2f2f6;">이번 턴만 끄기.</b> 다음 요청 하나(채팅이든 삽화든)가 빠진 채 나간 뒤 자동으로 켜진다.</td></tr>
+    </table>
+  </div>
+
+  <div style="background-color: #1b1b22; border-radius: 12px; padding: 16px; margin: 0;">
+    <div style="font-size: 15px; font-weight: 700; color: #f2f2f6; margin: 0 0 8px 0;">② 보조 축 — 보조모델 요청에만 작용</div>
+    <table style="width: 100%; border-collapse: collapse; font-size: 14px; color: #c8c8d2;">
+      <tr><td style="padding: 6px 8px 6px 0; width: 92px; vertical-align: top;"><span style="display: inline-block; background-color: #1f2f4d; color: #8ec0f0; font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 999px;">보조 제외</span></td><td style="padding: 6px 0; line-height: 1.6;"><b style="color: #f2f2f6;">메인 채팅엔 그대로 들어가고</b>, 삽화·요약·루아 axLLM 같은 보조모델 요청에서만 빠진다. 한 번 설정하면 계속 유지.</td></tr>
+      <tr><td style="padding: 6px 8px 6px 0; vertical-align: top;"><span style="display: inline-block; border: 1px dashed #2f3340; color: #6a6f80; font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 999px;">보조 포함</span></td><td style="padding: 6px 0; line-height: 1.6;">기본값. 보조 요청에도 들어간다.</td></tr>
+    </table>
+  </div>
+
+  <div style="font-size: 13px; color: #8a8a99; line-height: 1.6; margin: 12px 0 0 0;">예: <span style="color: #8ec0f0;">보조 제외</span> 깔아둔 항목에 <span style="color: #f0c98e;">1턴 OFF</span>를 걸면, 그 턴만 메인에서도 빠지고 복구되면 다시 "메인 ON · 보조 제외"로 돌아온다.</div>
+</div>
+
+<p style="font-size: 0; margin: 0; padding: 0;">**-- How it works --**</p>
+<div style="background-color: #16161c; border: 1px solid #2c2c36; border-radius: 16px; padding: 22px; margin: 0 0 16px 0;">
+  <div style="font-size: 20px; font-weight: 800; color: #f2f2f6; margin: 0 0 12px 0;">어떻게 끄는 건데?</div>
+  <div style="font-size: 15px; color: #c8c8d2; line-height: 1.75; margin: 0 0 12px 0;">리수 로어북 엔진은 항목 내용 맨 위에 <code style="background-color: #0f0f14; color: #f0c98e; padding: 2px 6px; border-radius: 6px; font-size: 13px;">@@dont_activate</code> 데코레이터가 있으면 키 매칭이든 상시활성이든 상관없이 그 항목을 안 넣는다. 이 플러그인은 그 한 줄을 끼웠다 뺐다 하는 게 전부다.</div>
+  <div style="background-color: #0f0f14; border-radius: 10px; padding: 12px 14px; font-family: Consolas, 'Courier New', monospace; font-size: 13px; color: #d0d0d8; line-height: 1.7; margin: 0 0 12px 0;">
+    <span style="color: #f08ea3;">@@dont_activate lbtoggle</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;← 고정 끄기<br>
+    <span style="color: #f0c98e;">@@dont_activate lbtoggle once</span> &nbsp;← 이번 턴만<br>
+    <span style="color: #8ec0f0;">@@lbtoggle sub_off</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;← 보조 제외<br>
+    <span style="color: #8a8a99;">레나 라이온즈는 {{char}}가 소속된 프로야구 구단이다. ...</span>
+  </div>
+  <div style="font-size: 14px; color: #c8c8d2; line-height: 1.75; margin: 0;">
+    · 키, 보조키, 삽입 순서, 상시활성, 폴더 전부 <b style="color: #f2f2f6;">원본 그대로</b><br>
+    · 상태가 항목 내용 안에 있어서 별도 저장소 없이 <b style="color: #f2f2f6;">세이브와 같이 동기화</b><br>
+    · 플러그인을 지워도 마커 줄만 남을 뿐이고, 그 줄은 엔진이 그냥 무시한다<br>
+    · 보조 제외는 요청이 나가기 직전 훅에서 그 항목 문장을 <b style="color: #f2f2f6;">메시지에서 걷어내는</b> 방식 (DB엔 아무것도 안 씀)
+  </div>
+</div>
+
+<p style="font-size: 0; margin: 0; padding: 0;">**-- Install --**</p>
+<div style="background-color: #16161c; border: 1px solid #2c2c36; border-radius: 16px; padding: 22px; margin: 0 0 16px 0;">
+  <div style="font-size: 20px; font-weight: 800; color: #f2f2f6; margin: 0 0 12px 0;">설치</div>
+  <div style="font-size: 15px; color: #c8c8d2; line-height: 1.8; margin: 0;">
+    <div style="margin: 0 0 6px 0;"><span style="display: inline-block; background-color: #4b4bd8; color: #fff; font-weight: 800; font-size: 13px; width: 24px; height: 24px; line-height: 24px; text-align: center; border-radius: 999px; margin-right: 8px;">1</span>아래 파일을 받는다 (<code style="background-color: #0f0f14; color: #d0d0d8; padding: 2px 6px; border-radius: 6px; font-size: 13px;">lorebookToggle.plugin.js</code>)</div>
+    <div style="margin: 0 0 6px 0;"><span style="display: inline-block; background-color: #4b4bd8; color: #fff; font-weight: 800; font-size: 13px; width: 24px; height: 24px; line-height: 24px; text-align: center; border-radius: 999px; margin-right: 8px;">2</span>리수 → 설정 → 플러그인 → <b style="color: #f2f2f6;">플러그인 불러오기</b></div>
+    <div style="margin: 0 0 6px 0;"><span style="display: inline-block; background-color: #4b4bd8; color: #fff; font-weight: 800; font-size: 13px; width: 24px; height: 24px; line-height: 24px; text-align: center; border-radius: 999px; margin-right: 8px;">3</span>권한 물어보면 <b style="color: #f2f2f6;">허용</b>. 요청 수정(보조 제외·자동 복구용), 데이터베이스(모듈 로어북 읽기용), 메인 화면(버튼 색 바꾸기용) 세 가지</div>
+    <div style="margin: 0;"><span style="display: inline-block; background-color: #4b4bd8; color: #fff; font-weight: 800; font-size: 13px; width: 24px; height: 24px; line-height: 24px; text-align: center; border-radius: 999px; margin-right: 8px;">4</span>채팅 화면 오른쪽 위 <b style="color: #f2f2f6;">📕 버튼</b>으로 연다</div>
+  </div>
+  <div style="background-color: #1b1b22; border-radius: 10px; padding: 12px 14px; font-size: 13px; color: #8a8a99; line-height: 1.6; margin: 14px 0 0 0;">버전을 올려 다시 넣으면 리수가 새 스크립트로 보고 권한을 다시 묻는다. 요청 수정 권한은 리수가 3일마다 한 번 더 확인하는데, 거부하면 보조 제외랑 자동 복구가 조용히 꺼지니 허용으로.</div>
+</div>
+
+<p style="font-size: 0; margin: 0; padding: 0;">**-- Panel --**</p>
+<div style="background-color: #16161c; border: 1px solid #2c2c36; border-radius: 16px; padding: 22px; margin: 0 0 16px 0;">
+  <div style="font-size: 20px; font-weight: 800; color: #f2f2f6; margin: 0 0 12px 0;">패널 보는 법</div>
+  <table style="width: 100%; border-collapse: collapse; font-size: 14px; color: #c8c8d2;">
+    <tr style="background-color: #1b1b22;"><td style="padding: 10px 12px; font-weight: 700; color: #f2f2f6; width: 34%; vertical-align: top; border-bottom: 1px solid #2c2c36;">모드 선택<br><span style="font-size: 12px; color: #8a8a99; font-weight: 400;">고정 끄기 / 이번 턴만 끄기 / 보조모델 제외</span></td><td style="padding: 10px 12px; line-height: 1.6; border-bottom: 1px solid #2c2c36;">아래 모든 끄기·켜기 버튼이 <b style="color: #f2f2f6;">어느 축을 건드릴지</b> 정한다. 보조모델 제외 모드에선 버튼이 "보조 제외 / 보조 포함"으로 바뀐다.</td></tr>
+    <tr><td style="padding: 10px 12px; font-weight: 700; color: #f2f2f6; vertical-align: top; border-bottom: 1px solid #2c2c36;">모두 / 캐릭터 / 모듈 전체 / 그룹 / 개별</td><td style="padding: 10px 12px; line-height: 1.6; border-bottom: 1px solid #2c2c36;">범위별 일괄 버튼. 검색창에 이름이나 키를 치면 <b style="color: #f2f2f6;">보이는 것만</b> 일괄 적용된다.</td></tr>
+    <tr style="background-color: #1b1b22;"><td style="padding: 10px 12px; font-weight: 700; color: #f2f2f6; vertical-align: top; border-bottom: 1px solid #2c2c36;">비활성 모듈 안 보기</td><td style="padding: 10px 12px; line-height: 1.6; border-bottom: 1px solid #2c2c36;">꺼진 모듈 로어북은 어차피 안 들어가니 숨긴다. 기본 켬.</td></tr>
+    <tr><td style="padding: 10px 12px; font-weight: 700; color: #f2f2f6; vertical-align: top; border-bottom: 1px solid #2c2c36;">최근 요청 기록</td><td style="padding: 10px 12px; line-height: 1.6; border-bottom: 1px solid #2c2c36;">요청이 지나갈 때마다 한 줄. 메인/보조 구분, 메시지 수, 걷어낸 항목(✂️ 통째 / ✂️△ 일부), 글자 수 변화, 응답 길이. <b style="color: #f2f2f6;">크게 보기</b>로 펼칠 수 있다.</td></tr>
+    <tr style="background-color: #1b1b22;"><td style="padding: 10px 12px; font-weight: 700; color: #f2f2f6; vertical-align: top;">편집 전 / 삭제된 부분만 / 편집 후</td><td style="padding: 10px 12px; line-height: 1.6;">보조 제외가 실제로 걷어낸 요청은 본문을 최근 2개까지 메모리에 들고 있다. 빨간 취소선으로 뭐가 빠졌는지 보고, JSON으로 복사도 된다. 새로고침하면 사라진다.</td></tr>
+  </table>
+</div>
+
+<p style="font-size: 0; margin: 0; padding: 0;">**-- Recipes --**</p>
+<div style="background-color: #16161c; border: 1px solid #2c2c36; border-radius: 16px; padding: 22px; margin: 0 0 16px 0;">
+  <div style="font-size: 20px; font-weight: 800; color: #f2f2f6; margin: 0 0 12px 0;">자주 쓰는 조합</div>
+  <div style="background-color: #1b1b22; border-radius: 12px; padding: 14px 16px; margin: 0 0 10px 0;">
+    <div style="font-size: 15px; font-weight: 700; color: #8ec0f0; margin: 0 0 4px 0;">삽화 모듈에 로어북 안 넣기</div>
+    <div style="font-size: 14px; color: #c8c8d2; line-height: 1.6;">모드를 <b style="color: #f2f2f6;">보조모델 제외</b>로 → 캐릭터 "보조 제외" 한 번. 끝. 메인 채팅은 그대로고 삽화 요청만 가벼워진다. 실제로 17만 자짜리 삽화 요청이 7만 자로 줄었다.</div>
+  </div>
+  <div style="background-color: #1b1b22; border-radius: 12px; padding: 14px 16px; margin: 0 0 10px 0;">
+    <div style="font-size: 15px; font-weight: 700; color: #f0c98e; margin: 0 0 4px 0;">이 턴만 세계관 빼고 받아보기</div>
+    <div style="font-size: 14px; color: #c8c8d2; line-height: 1.6;">모드를 <b style="color: #f2f2f6;">이번 턴만 끄기</b>로 → 원하는 항목 끄기 → 메시지 전송. 응답 받으면 자동으로 돌아온다.</div>
+  </div>
+  <div style="background-color: #1b1b22; border-radius: 12px; padding: 14px 16px; margin: 0;">
+    <div style="font-size: 15px; font-weight: 700; color: #f08ea3; margin: 0 0 4px 0;">한동안 안 쓸 항목 묶어서 재우기</div>
+    <div style="font-size: 14px; color: #c8c8d2; line-height: 1.6;">모드를 <b style="color: #f2f2f6;">고정 끄기</b>로 → 검색창에 공통 이름 → 모두 끄기. 나중에 같은 검색으로 모두 켜기.</div>
+  </div>
+</div>
+
+<p style="font-size: 0; margin: 0; padding: 0;">**-- Caveats --**</p>
+<div style="background-color: #1c1418; border: 1px solid #4d1f2a; border-radius: 16px; padding: 22px; margin: 0 0 16px 0;">
+  <div style="font-size: 20px; font-weight: 800; color: #f08ea3; margin: 0 0 12px 0;">알고 쓰면 좋은 한계</div>
+  <div style="font-size: 14px; color: #d8c8cc; line-height: 1.8; margin: 0;">
+    · <b style="color: #f2f2f6;">보조 제외는 문자열 매칭</b>이다. 항목 본문이 CBS 조건문 범벅이면 통째로는 못 찾고 평문 줄만 걷어낸다(✂️△). 본문이 전부 CBS면 판별 불가. 그런 항목은 고정 끄기나 이번 턴만으로.<br>
+    · <b style="color: #f2f2f6;">리수 요청 파이프라인을 타는 요청만</b> 본다. 메인 채팅, 루아 axLLM/LLM, 리수 내장 번역·요약은 되고, 플러그인이 API를 직접 호출하는 경우(nativeFetch)는 못 본다.<br>
+    · <b style="color: #f2f2f6;">이번 턴만</b>은 삽화 같은 보조 호출이 먼저 소비하면 그 뒤 "다음 메시지 보낼 때" 켜진다. 삽화만 돌리고 패널 열면 아직 1턴 OFF로 보이는 게 정상.<br>
+    · 같은 요청 훅을 쓰는 다른 플러그인(로어 모니터류)은 리수가 플러그인을 동시에 띄우는 탓에 순서가 그때그때 달라서, 보조 요청에선 걷어내기 <b style="color: #f2f2f6;">전</b> 수치를 보여줄 수 있다. 실제 결과는 이 플러그인의 기록 패널 글자 수가 기준.<br>
+    · 그룹 채팅은 캐릭터 로어북 구조가 달라 제대로 테스트 안 됐다.
+  </div>
+</div>
+
+<p style="font-size: 0; margin: 0; padding: 0;">**-- Download --**</p>
+<div style="background-color: #16161c; border: 2px solid #4b4bd8; border-radius: 16px; padding: 22px; margin: 0 0 16px 0;">
+  <div style="font-size: 20px; font-weight: 800; color: #f2f2f6; margin: 0 0 10px 0;">다운로드</div>
+  <div style="font-size: 14px; color: #c8c8d2; line-height: 1.7; margin: 0 0 10px 0;">파일 하나다. 아래 링크에서 받거나 첨부파일로.</div>
+  <div style="background-color: #0f0f14; border-radius: 10px; padding: 12px 14px; font-family: Consolas, 'Courier New', monospace; font-size: 12.5px; color: #8ec0f0; line-height: 1.6; word-break: break-all;">https://raw.githubusercontent.com/renamerdis-wq/Risuai/ccr-4f26087e-ylrdkc/util/lorebookToggle.plugin.js</div>
+  <div style="font-size: 13px; color: #8a8a99; line-height: 1.6; margin: 10px 0 0 0;">현재 v2.2.0 · RisuAI 플러그인 API 3.0 · 웹/데스크톱/모바일 공통</div>
+</div>
+
+<p style="font-size: 0; margin: 0; padding: 0;">**-- Footer --**</p>
+<div style="text-align: center; font-size: 12px; color: #5c5c6b; padding: 6px 0 20px 0; line-height: 1.7;">
+  문제 있으면 패널의 "최근 요청 기록" 스샷이랑 같이 댓글로.<br>마커 줄(@@dont_activate lbtoggle …)은 항목 내용에서 직접 지워도 되고, 그러면 플러그인 없이도 원복된다.
+</div>
+
+</div>
+<p style="font-size: 0; margin: 0; padding: 0;">**-- End Main Container --**</p>
+
+</body>
